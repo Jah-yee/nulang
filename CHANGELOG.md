@@ -1,5 +1,9 @@
 # Nulang Changelog
 
+### WASM component host authority parity — 2026-10-10
+- Recut the isolated WASM component host authority guard against current main: replace backend-local boolean flags with exact typed `AuthorityManifest` grants and deny unauthorized imports before instantiation.
+- Preserve independent operation checks for `IO::Log`, `Time::Now`, and `Random::U64`; regressions cover default denial, authorized access, and sibling-grant isolation. This applies to component host imports only; broader WASI and native host authority remain separate work.
+
 ### Actor scheduler LIFO handoff and lifecycle pooling — 2026-10-10
 - **Performance:** Optimized actor scheduler LIFO handoff with strict
   priority gating, and added actor lifecycle pooling.
