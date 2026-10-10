@@ -3541,7 +3541,7 @@ fn compile_unary(
     builder: &mut FunctionBuilder,
     op: crate::ast::UnOp,
     operand: mir::LocalId,
-    type_meta: &TypeMetadata,
+    _type_meta: &TypeMetadata,
     helpers: &HashMap<&str, FuncRef>,
     local_vals: &HashMap<u32, Value>,
     mode: CompileMode,
@@ -3554,21 +3554,14 @@ fn compile_unary(
     use crate::ast::UnOp;
     match op {
         UnOp::Neg => {
-            if type_meta.is_known(reg as usize, KnownType::Int) {
-                if mode == CompileMode::Unboxed {
-                    Ok(builder.ins().ineg(val))
-                } else {
-                    let payload = emit_sext48(builder, val);
-                    let neg = builder.ins().ineg(payload);
-                    Ok(emit_tag_int(builder, neg))
-                }
-            } else if type_meta.is_known(reg as usize, KnownType::Float) {
-                let f = builder.ins().bitcast(types::F64, MemFlags::new(), val);
-                let neg = builder.ins().fneg(f);
-                Ok(builder.ins().bitcast(types::I64, MemFlags::new(), neg))
-            } else {
-                call_helper(builder, helpers, "nulang_ineg", &[val])
+            // Checked negation and dynamic nil/type errors are observable language
+            // behavior. Native arithmetic must not bypass the VM-parity helper.
+            if mode == CompileMode::Unboxed {
+                return Err(AotCompileError::Internal(
+                    "checked Neg reached unboxed AOT codegen".into(),
+                ));
             }
+            call_helper(builder, helpers, "nulang_ineg", &[val])
         }
         UnOp::Not => call_helper(builder, helpers, "nulang_not", &[val]),
         UnOp::Deref => Err(AotCompileError::Unsupported("UnOp::Deref".into())),
