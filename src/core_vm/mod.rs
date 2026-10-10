@@ -300,6 +300,12 @@ impl CoreVM {
             }
             OpCode::INeg => {
                 let a = value_layout::as_int_raw(self.frames[frame_idx].regs[op1 as usize]);
+                if a == value_layout::INT48_MIN {
+                    return Err(format!(
+                        "integer overflow: `neg` on {} exceeds the 48-bit range",
+                        a
+                    ));
+                }
                 self.frames[frame_idx].regs[op2 as usize] = value_layout::tag_int(-a);
             }
             OpCode::IInc => {
