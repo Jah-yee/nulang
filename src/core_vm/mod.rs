@@ -716,6 +716,31 @@ mod tests {
     }
 
     #[test]
+    fn test_core_ineg_rejects_int48_min_overflow() {
+        let mut module = CodeModule::new("checked_ineg");
+        let idx = module.add_constant(Constant::Int(value_layout::INT48_MIN));
+        module.emit(Instruction::new3(
+            OpCode::ConstU,
+            ((idx >> 8) & 0xFF) as u8,
+            (idx & 0xFF) as u8,
+            0,
+        ));
+        module.emit(Instruction::new2(OpCode::INeg, 0, 1));
+        module.emit(Instruction::new0(OpCode::Halt));
+        module.entry_point = Some(0);
+
+        let mut vm = CoreVM::new();
+        let module_idx = vm.load_module_from_code(&module).unwrap();
+        let err = vm
+            .run(module_idx, 0)
+            .expect_err("negating INT48_MIN must not wrap");
+        assert!(
+            err.contains("integer overflow"),
+            "unexpected CoreVM error: {err}"
+        );
+    }
+
+    #[test]
     fn test_core_control_flow() {
         assert_int("if 3 > 2 then 100 else 200", 100);
         assert_int("if 1 < 2 then 100 else 200", 100);
