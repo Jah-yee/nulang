@@ -3599,8 +3599,20 @@ fn compile_unary(
     builder: &mut FunctionBuilder,
     op: crate::ast::UnOp,
     operand: mir::LocalId,
-    type_meta: &TypeMetadata,
+2:     _type_meta: &TypeMetadata,
     float_typed: &[bool],
+3:             if mode == CompileMode::Unboxed {
+                return Err(AotCompileError::Internal(
+                    "checked Neg reached unboxed AOT codegen".into(),
+                ));
+            }
+            if float_typed[operand.0 as usize] {
+                // FNeg coerces a runtime nil to 0.0; preserve that bytecode
+                // behavior while keeping every negation dynamically checked.
+                call_helper(builder, helpers, "nulang_ineg_nil0", &[val])
+            } else {
+                call_helper(builder, helpers, "nulang_ineg", &[val])
+            }
     helpers: &HashMap<&str, FuncRef>,
     local_vals: &HashMap<u32, Value>,
     mode: CompileMode,
@@ -3616,24 +3628,21 @@ fn compile_unary(
         UnOp::Neg => {
             // Checked negation and dynamic nil/type errors are observable language
             // behavior. Native arithmetic must not bypass the VM-parity helper.
-            if type_meta.is_known(reg_usize, KnownType::Int) {
-                if mode == CompileMode::Unboxed {
-                    Ok(builder.ins().ineg(val))
-                } else {
-                    let payload = emit_sext48(builder, val);
-                    let neg = builder.ins().ineg(payload);
-                    Ok(emit_tag_int(builder, neg))
-                }
-            } else if type_meta.is_known(reg_usize, KnownType::Float)
-                || float_typed[operand.0 as usize]
-            {
-                // Statically float-typed operand (bytecode would emit FNeg,
-                // which coerces a runtime nil to 0.0). Use the nil-coercing
-                // helper so a nil lands as -0.0, matching the interpreter.
+2:     _type_meta: &TypeMetadata,
+    float_typed: &[bool],
+3:             if mode == CompileMode::Unboxed {
+                return Err(AotCompileError::Internal(
+                    "checked Neg reached unboxed AOT codegen".into(),
+                ));
+            }
+            if float_typed[operand.0 as usize] {
+                // FNeg coerces a runtime nil to 0.0; preserve that bytecode
+                // behavior while keeping every negation dynamically checked.
                 call_helper(builder, helpers, "nulang_ineg_nil0", &[val])
             } else {
                 call_helper(builder, helpers, "nulang_ineg", &[val])
             }
+            call_helper(builder, helpers, "nulang_ineg", &[val])
         }
         UnOp::Not => call_helper(builder, helpers, "nulang_not", &[val]),
         UnOp::Deref => Err(AotCompileError::Unsupported("UnOp::Deref".into())),
