@@ -58,7 +58,7 @@ pub fn is_opcode_compilable(op: OpCode) -> bool {
             | OpCode::IMul
             | OpCode::IDiv
             | OpCode::IMod
-            | OpCode::INeg
+            // INeg can raise checked overflow/type errors; JIT lacks an exceptional exit.
             | OpCode::IInc
             | OpCode::IDec
             | OpCode::IPow
