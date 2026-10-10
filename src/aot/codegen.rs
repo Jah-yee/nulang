@@ -973,6 +973,22 @@ pub fn is_all_int(func: &mir::Function) -> bool {
             }
         }
     }
+    // Checked integer negation can fail at INT48_MIN. The runtime helper uses
+    // NaN-tagged values; an unboxed native entry point would silently wrap.
+    for block in &func.blocks {
+        for stmt in &block.stmts {
+            if matches!(
+                stmt,
+                mir::Stmt::Assign {
+                    op: mir::RValue::Unary(crate::ast::UnOp::Neg, _),
+                    ..
+                }
+            ) {
+                return false;
+            }
+        }
+    }
+
     // Nil-producing / heap-object operations must stay boxed. An unboxed
     // function tags its raw result, so a nil (div-by-zero, negative int-pow
     // exponent, out-of-bounds array access) would be re-tagged as int 0, and
@@ -3525,7 +3541,7 @@ fn compile_unary(
     builder: &mut FunctionBuilder,
     op: crate::ast::UnOp,
     operand: mir::LocalId,
-    type_meta: &TypeMetadata,
+    _type_meta: &TypeMetadata,
     helpers: &HashMap<&str, FuncRef>,
     local_vals: &HashMap<u32, Value>,
     mode: CompileMode,
@@ -3538,21 +3554,14 @@ fn compile_unary(
     use crate::ast::UnOp;
     match op {
         UnOp::Neg => {
-            if type_meta.is_known(reg as usize, KnownType::Int) {
-                if mode == CompileMode::Unboxed {
-                    Ok(builder.ins().ineg(val))
-                } else {
-                    let payload = emit_sext48(builder, val);
-                    let neg = builder.ins().ineg(payload);
-                    Ok(emit_tag_int(builder, neg))
-                }
-            } else if type_meta.is_known(reg as usize, KnownType::Float) {
-                let f = builder.ins().bitcast(types::F64, MemFlags::new(), val);
-                let neg = builder.ins().fneg(f);
-                Ok(builder.ins().bitcast(types::I64, MemFlags::new(), neg))
-            } else {
-                call_helper(builder, helpers, "nulang_ineg", &[val])
+            // Checked negation and dynamic nil/type errors are observable language
+            // behavior. Native arithmetic must not bypass the VM-parity helper.
+            if mode == CompileMode::Unboxed {
+                return Err(AotCompileError::Internal(
+                    "checked Neg reached unboxed AOT codegen".into(),
+                ));
             }
+            call_helper(builder, helpers, "nulang_ineg", &[val])
         }
         UnOp::Not => call_helper(builder, helpers, "nulang_not", &[val]),
         UnOp::Deref => Err(AotCompileError::Unsupported("UnOp::Deref".into())),
@@ -3645,6 +3654,45 @@ mod tests {
         builder.terminate(mir::Terminator::Return(Some(tmp)));
         let func = builder.build();
         assert!(is_all_int(&func));
+    }
+
+    #[test]
+    fn test_is_all_int_false_with_checked_negation() {
+        let mut builder = mir::FunctionBuilder::new("checked_neg", Some(crate::types::Type::int()));
+        let x = builder.add_param("x", crate::types::Type::int());
+        let neg = builder.add_temp(crate::types::Type::int());
+        builder.assign(neg, mir::RValue::Unary(crate::ast::UnOp::Neg, x));
+        builder.terminate(mir::Terminator::Return(Some(neg)));
+        assert!(
+            !is_all_int(&builder.build()),
+            "checked Neg cannot use an unboxed native entry point"
+        );
+    }
+
+    #[test]
+    fn test_aot_checked_neg_int48_min_overflow() {
+        let mut builder = mir::FunctionBuilder::new("__main", Some(crate::types::Type::int()));
+        let x = builder.add_temp(crate::types::Type::int());
+        builder.assign(
+            x,
+            mir::RValue::Const(crate::bytecode::Constant::Int(
+                crate::value_layout::INT48_MIN,
+            )),
+        );
+        let neg = builder.add_temp(crate::types::Type::int());
+        builder.assign(neg, mir::RValue::Unary(crate::ast::UnOp::Neg, x));
+        builder.terminate(mir::Terminator::Return(Some(neg)));
+        let mut module = mir::Module::new("checked_neg");
+        module.functions.push(builder.build());
+
+        let aot = crate::aot::AotModule::compile(&module).expect("AOT compile");
+        let err = aot
+            .run()
+            .expect_err("negating INT48_MIN must not silently wrap");
+        assert!(
+            err.to_string().contains("integer overflow"),
+            "unexpected native error: {err}"
+        );
     }
 
     #[test]
