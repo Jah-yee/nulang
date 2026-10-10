@@ -1,5 +1,10 @@
 # Nulang Changelog
 
+### Checked unary negation backend parity — 2026-10-10
+- Align CoreVM and native AOT with the interpreter's checked signed 48-bit unary negation: negating `INT48_MIN` now returns an overflow error rather than silently wrapping.
+- Route boxed native unary negation through the existing checked runtime helper; hold integer `INeg` out of JIT and SIMD compilation until compiled exceptional exits can preserve language errors.
+- Add focused CoreVM, AOT, and JIT regression tests. No change to source type inference or WASM source semantics.
+
 ### Actor scheduler LIFO handoff and lifecycle pooling — 2026-10-10
 - **Performance:** Optimized actor scheduler LIFO handoff with strict
   priority gating, and added actor lifecycle pooling.
