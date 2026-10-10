@@ -973,6 +973,22 @@ pub fn is_all_int(func: &mir::Function) -> bool {
             }
         }
     }
+    // Checked integer negation can fail at INT48_MIN. The runtime helper uses
+    // NaN-tagged values; an unboxed native entry point would silently wrap.
+    for block in &func.blocks {
+        for stmt in &block.stmts {
+            if matches!(
+                stmt,
+                mir::Stmt::Assign {
+                    op: mir::RValue::Unary(crate::ast::UnOp::Neg, _),
+                    ..
+                }
+            ) {
+                return false;
+            }
+        }
+    }
+
     // Nil-producing / heap-object operations must stay boxed. An unboxed
     // function tags its raw result, so a nil (div-by-zero, negative int-pow
     // exponent, out-of-bounds array access) would be re-tagged as int 0, and
