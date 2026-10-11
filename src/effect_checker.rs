@@ -34,13 +34,10 @@ pub fn effect_row_subset(sub: &EffectRow, sup: &EffectRow) -> bool {
         (EffectRow::Closed(sub_effs), EffectRow::Open(sup_effs, _)) => {
             sub_effs.iter().all(|e| sup_effs.contains(e))
         }
-        // Open sub, closed sup: the open row *might* contain effects beyond
-        // its concrete list, so it is only a subset if the concrete list
-        // itself is already a subset and the open row is empty except for the
-        // variable that could introduce new effects.
-        (EffectRow::Open(sub_effs, _), EffectRow::Closed(sup_effs)) => {
-            sub_effs.iter().all(|e| sup_effs.contains(e))
-        }
+        // Open sub, closed sup: an unresolved row variable may contain
+        // effects outside the closed policy even when all known effects fit.
+        // Resolve the inferred row before using a closed authority boundary.
+        (EffectRow::Open(_, _), EffectRow::Closed(_)) => false,
         // Open sub, open sup: both row variables could introduce arbitrary
         // effects.  We only require that the concrete effects of sub are
         // contained in the concrete effects of sup.
