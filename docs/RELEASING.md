@@ -11,16 +11,30 @@ How to publish a Nulang release with prebuilt binaries. Run
   on RFC-ratified changes — usually leave it alone. See `GOVERNANCE.md` §5.
 - Add a `CHANGELOG.md` entry for the new version.
 
-## 2. Tag and push
+## 2. Validate the release candidate before tagging
 
-Tags matching `v*` trigger `.github/workflows/release.yml`:
+The same four-target `.github/workflows/release.yml` matrix runs as a
+**non-publishing rehearsal** when a pull request changes the release workflow,
+`Cargo.toml`, `Cargo.lock`, `src/main.rs`, or release verification scripts.
+Confirm the `Release` PR workflow reaches terminal success for all targets,
+including artifact packaging, checksums, and native-on-runner smoke tests.
+On pull requests, the version-tag check is skipped (there is no tag) and the
+`Publish Release` job is explicitly disabled. A queued/skipped build is not
+positive execution evidence. This does **not** replace clean-machine checks,
+particularly native Linux arm64 execution.
+
+## 3. Tag and push
+
+Only after the release candidate passes the checklist and all required reviews,
+push the chosen version tag. Tags matching `v*` trigger the publication path
+in `.github/workflows/release.yml`:
 
 ```bash
 git tag v0.2.0
 git push origin v0.2.0
 ```
 
-## 3. Watch the workflow
+## 4. Watch the workflow
 
 The `Release` workflow first verifies that the pushed tag matches both
 `Cargo.toml` and the CLI `VERSION`, then builds four targets in parallel
@@ -54,7 +68,7 @@ creates a GitHub Release with:
 > that a cross-compiled binary has passed a native arm64 smoke test unless
 > such a check actually ran.
 
-## 4. Verify the release
+## 5. Verify the release
 
 - Open https://github.com/nulang-org/nulang/releases and confirm all 8 files
   (4 tarballs + 4 checksums) are attached.
