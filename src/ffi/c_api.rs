@@ -1349,6 +1349,20 @@ mod tests {
     }
 
     #[test]
+    fn test_owned_integer_constructor_rejects_values_outside_nulang_int_range() {
+        let rt = nulang_runtime_new();
+        assert_eq!(unsafe { nulang_owned_value_int_new(rt, i64::MAX) }, 0);
+        assert!(!unsafe { nulang_last_error(rt) }.is_null());
+        let supported = unsafe { nulang_owned_value_int_new(rt, 1024) };
+        assert_ne!(supported, 0);
+        let mut out = 0;
+        assert!(unsafe { nulang_owned_value_int(rt, supported, &mut out) });
+        assert_eq!(out, 1024);
+        assert!(unsafe { nulang_owned_value_release(rt, supported) });
+        unsafe { nulang_runtime_free(rt) };
+    }
+
+    #[test]
     fn test_owned_handle_rejects_pointer_forgery_and_invalid_module() {
         let rt = nulang_runtime_new();
         let source = CString::new("1").unwrap();
