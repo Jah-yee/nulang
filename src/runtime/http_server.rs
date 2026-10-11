@@ -17,6 +17,7 @@ use std::time::Duration;
 use crate::bytecode::CodeModule;
 use crate::value_layout::PAYLOAD_MASK;
 use crate::vm::{resolve_value_string, Value, CLOSURE_ENV_FLAG, VM};
+use crate::web::csrf::validate_mutation_origin;
 use crate::web::dispatch::{render_direct_request, DirectRequestRenderError};
 use crate::web::http_problem::request_decode_problem_response;
 use crate::web::http_request::HttpRequestBindingInputs;
@@ -180,8 +181,20 @@ impl HttpServerState {
                     let mut req = httparse::Request::new(&mut headers);
                     match req.parse(&buf[..n]) {
                         Ok(httparse::Status::Complete(body_offset)) => {
-                            let method = HttpMethod::from_str(req.method.unwrap_or("GET"))
-                                .unwrap_or(HttpMethod::Get);
+                            let Some(method) = HttpMethod::from_str(req.method.unwrap_or("")) else {
+                                HttpServerState::write_response(
+                                    &mut stream,
+                                    &HttpResponse {
+                                        status: 405,
+                                        headers: vec![(
+                                            "Content-Type".into(),
+                                            "text/plain; charset=utf-8".into(),
+                                        )],
+                                        body: b"Method not allowed".to_vec(),
+                                    },
+                                );
+                                break;
+                            };
                             let path = req.path.unwrap_or("/").to_string();
 
                             let headers: Vec<(String, String)> = req
@@ -709,6 +722,32 @@ pub fn render_route_handler(
     }
 }
 
+/// Reject unsafe browser requests before invoking any route. A trusted
+/// reverse proxy must configure NULANG_WEB_PUBLIC_ORIGIN to its external origin.
+/// This is CSRF provenance validation, not authentication or authorization.
+fn unsafe_origin_response(
+    request: &HttpRequest,
+    local_addr: Option<std::net::SocketAddr>,
+    public_origin: Option<&str>,
+) -> Option<HttpResponse> {
+    let failure = validate_mutation_origin(
+        request.method.as_str(),
+        &request.headers,
+        local_addr,
+        public_origin,
+    )
+    .err()?;
+    eprintln!("Nulang Web denied state-changing request: {failure:?}");
+    Some(HttpResponse {
+        status: 403,
+        headers: vec![
+            ("Content-Type".into(), "text/plain; charset=utf-8".into()),
+            ("Cache-Control".into(), "no-store".into()),
+        ],
+        body: b"Forbidden: invalid request origin".to_vec(),
+    })
+}
+
 fn invalid_ui_action_response(captured: &HttpRequestBindingInputs) -> Option<HttpResponse> {
     captured
         .ui_message_error
@@ -840,8 +879,20 @@ impl WebDevServer {
                     let mut req = httparse::Request::new(&mut headers);
                     match req.parse(&buf[..n]) {
                         Ok(httparse::Status::Complete(body_offset)) => {
-                            let method = HttpMethod::from_str(req.method.unwrap_or("GET"))
-                                .unwrap_or(HttpMethod::Get);
+                            let Some(method) = HttpMethod::from_str(req.method.unwrap_or("")) else {
+                                HttpServerState::write_response(
+                                    &mut stream,
+                                    &HttpResponse {
+                                        status: 405,
+                                        headers: vec![(
+                                            "Content-Type".into(),
+                                            "text/plain; charset=utf-8".into(),
+                                        )],
+                                        body: b"Method not allowed".to_vec(),
+                                    },
+                                );
+                                break;
+                            };
                             let path = req.path.unwrap_or("/").to_string();
 
                             let headers: Vec<(String, String)> = req
@@ -893,7 +944,16 @@ impl WebDevServer {
                                 body,
                             };
 
-                            let mut response = if path.starts_with(Self::SSE_PATH_PREFIX) {
+                            // Verify browser provenance before route dispatch,
+                            // including legacy ambient-context handlers.
+                            let public_origin = std::env::var("NULANG_WEB_PUBLIC_ORIGIN").ok();
+                            let mut response = if let Some(forbidden) = unsafe_origin_response(
+                                &request,
+                                stream.local_addr().ok(),
+                                public_origin.as_deref(),
+                            ) {
+                                forbidden
+                            } else if path.starts_with(Self::SSE_PATH_PREFIX) {
                                 let room = &path[Self::SSE_PATH_PREFIX.len()..];
                                 Self::serve_sse(room, &mut stream, shutdown.clone());
                                 break;
@@ -1184,6 +1244,27 @@ mod tests {
         assert!(String::from_utf8(response.body)
             .unwrap()
             .contains("Invalid UI action envelope"));
+    }
+
+    #[test]
+    fn mutation_provenance_is_checked_before_route_execution() {
+        let mut request = HttpRequest {
+            method: HttpMethod::Post,
+            path: "/sign".to_string(),
+            headers: vec![("Host".into(), "localhost:8080".into())],
+            body: b"msg=untrusted".to_vec(),
+        };
+        let local = Some("127.0.0.1:8080".parse().unwrap());
+        let rejected = unsafe_origin_response(&request, local, None)
+            .expect("missing browser provenance must stop route execution");
+        assert_eq!(rejected.status, 403);
+        assert!(String::from_utf8_lossy(&rejected.body).contains("invalid request origin"));
+
+        request.headers.push(("Origin".into(), "http://localhost:8080".into()));
+        assert!(unsafe_origin_response(&request, local, None).is_none());
+        request.method = HttpMethod::Get;
+        request.headers.clear();
+        assert!(unsafe_origin_response(&request, local, None).is_none());
     }
 
     #[test]
