@@ -125,9 +125,9 @@ impl NulangRuntime {
     }
 
     pub(crate) fn last_error_message(&self) -> String {
-        self.last_error.clone().unwrap_or_else(|| {
-            "embedded Nulang operation failed without a diagnostic".to_string()
-        })
+        self.last_error
+            .clone()
+            .unwrap_or_else(|| "embedded Nulang operation failed without a diagnostic".to_string())
     }
 
     fn set_error(&mut self, err: NuError) {
