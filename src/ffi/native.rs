@@ -212,9 +212,15 @@ impl FfiRegistry {
         signature: Signature,
     ) -> Result<NativeFunction, String> {
         if let Some(func) = self.resolve(Some(library), symbol) {
+            if func.signature != signature {
+                return Err(format!("FFI signature mismatch for {library}::{symbol}"));
+            }
             return Ok(func);
         }
         if let Some(func) = self.resolve(None, symbol) {
+            if func.signature != signature {
+                return Err(format!("FFI signature mismatch for registered callback {symbol}"));
+            }
             return Ok(func);
         }
         let lib = self.load_library(library)?;
