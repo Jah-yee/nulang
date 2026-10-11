@@ -139,3 +139,53 @@ fn minimum_integer_negation_wraps_without_failing() {
     assert_eq!(run.stdout, b"after negation\n");
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn literal_prints_match_bytecode_reference_output() {
+    let dir = test_dir();
+    let source = "perform IO.print(\"Olá, Nulang\");\nperform IO.println(\"Second line\")";
+    let compiled = build(&dir, source);
+    assert!(
+        compiled.status.success(),
+        "compiler stderr: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let reference = Command::new(env!("CARGO_BIN_EXE_nulang"))
+        .arg("--backend")
+        .arg("bytecode")
+        .arg(dir.join("main.nula"))
+        .output()
+        .unwrap();
+    assert!(
+        reference.status.success(),
+        "reference VM stderr: {}",
+        String::from_utf8_lossy(&reference.stderr)
+    );
+    let native = Command::new(dir.join("hello")).output().unwrap();
+    assert!(native.status.success());
+    assert_eq!(native.stdout, reference.stdout);
+    assert_eq!(native.stderr, reference.stderr);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn explicit_output_symlink_to_source_is_rejected() {
+    use std::os::unix::fs::symlink;
+
+    let dir = test_dir();
+    let input = dir.join("source.nula");
+    let alias = dir.join("alias");
+    let source = "perform IO.print(\"do not overwrite\")";
+    fs::write(&input, source).unwrap();
+    symlink(&input, &alias).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_nulang"))
+        .args(["--emit-exe", "--out"])
+        .arg(&alias)
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert_eq!(fs::read_to_string(&input).unwrap(), source);
+    assert!(alias.symlink_metadata().unwrap().file_type().is_symlink());
+    fs::remove_dir_all(dir).unwrap();
+}
