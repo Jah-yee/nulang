@@ -146,3 +146,41 @@ fn negating_minimum_integer_fails_closed_before_linking() {
     assert!(!dir.join("hello").exists());
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn explicit_output_equal_to_input_cannot_overwrite_source() {
+    let dir = test_dir();
+    let input = dir.join("main.nula");
+    let original = b"perform IO.print(\\\"Never overwrite source\\\")";
+    fs::write(&input, original).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_nulang"))
+        .args(["--emit-exe", "--out"])
+        .arg(&input)
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert_eq!(fs::read(&input).unwrap(), original);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn extensionless_source_is_not_the_default_output_path() {
+    let dir = test_dir();
+    let input = dir.join("source");
+    let original = b"perform IO.print(\\\"preserve me\\\")";
+    fs::write(&input, original).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_nulang"))
+        .arg("--emit-exe")
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "compiler stderr: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(fs::read(&input).unwrap(), original);
+    assert_eq!(Command::new(dir.join("source.bin")).output().unwrap().stdout, b"preserve me\n");
+    fs::remove_dir_all(dir).unwrap();
+}
