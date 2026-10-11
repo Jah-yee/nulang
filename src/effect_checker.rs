@@ -38,11 +38,11 @@ pub fn effect_row_subset(sub: &EffectRow, sup: &EffectRow) -> bool {
         // effects outside the closed policy even when all known effects fit.
         // Resolve the inferred row before using a closed authority boundary.
         (EffectRow::Open(_, _), EffectRow::Closed(_)) => false,
-        // Open sub, open sup: both row variables could introduce arbitrary
-        // effects.  We only require that the concrete effects of sub are
-        // contained in the concrete effects of sup.
-        (EffectRow::Open(sub_effs, _), EffectRow::Open(sup_effs, _)) => {
-            sub_effs.iter().all(|e| sup_effs.contains(e))
+        // Open sub, open sup: unresolved tails can be compared only if
+        // they refer to the SAME row variable. Distinct region variables
+        // have independent unknown effects, even if known effects match.
+        (EffectRow::Open(sub_effs, sub_region), EffectRow::Open(sup_effs, sup_region)) => {
+            sub_region == sup_region && sub_effs.iter().all(|e| sup_effs.contains(e))
         }
     }
 }
