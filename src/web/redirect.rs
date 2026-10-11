@@ -41,11 +41,6 @@ pub fn render_redirect_fallback(url: &str) -> String {
     )
 }
 
-//! Compatibility-safe Web.redirect representation for the HTTP adapter.
-//!
-//! The Nulang language-level Web.redirect operation still returns Html, so
-//! standalone VM/conformance rendering can retain an HTML fallback.
-
 #[cfg(test)]
 mod tests {
     use super::{is_safe_redirect_target, render_redirect_fallback};
