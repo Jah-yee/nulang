@@ -35,6 +35,12 @@ class CriterionFilterTests(unittest.TestCase):
                 ["jit_tiering_profitability/interp/4000", "actor_selective_receive_depth/64"]
             ),
         )
+        self.assertEqual(
+            r"^(?:vm/perform/float_sqrt|vm/perform_direct/custom_handler)$",
+            confirm.criterion_filter(
+                ["vm_perform_float_sqrt", "vm_perform_direct_custom_handler"]
+            ),
+        )
 
     def test_pair_confirmation_filters_display_names_but_reads_history_keys(self):
         with tempfile.TemporaryDirectory() as tmp:
