@@ -583,6 +583,32 @@ fn main() {
         eprintln!("Error: --emit-exe and --emit-nbc are mutually exclusive");
         std::process::exit(1);
     }
+
+    // Validate the standalone artifact request before early-return paths
+    // such as --eval, --check and .nbc execution can silently override it.
+    // For now, --emit-exe consumes exactly one source file.
+    if opts.emit_exe {
+        if opts.eval_code.is_some()
+            || opts.check_file.is_some()
+            || opts.watch.is_some()
+            || opts.repl
+            || opts.lsp
+            || opts.dap
+            || opts.doc
+            || opts.bench_count.is_some()
+        {
+            eprintln!("Error: --emit-exe requires a source file, not another execution mode");
+            std::process::exit(1);
+        }
+        if positional.len() != 1 || positional[0].ends_with(".nbc") {
+            eprintln!("Error: --emit-exe requires exactly one source file (not .nbc)");
+            std::process::exit(1);
+        }
+        if opts.backend != "bytecode" && opts.backend != "native" {
+            eprintln!("Error: --emit-exe is incompatible with --backend {}", opts.backend);
+            std::process::exit(1);
+        }
+    }
     if opts.emit_behavior_manifest.is_some() && !opts.emit_nbc {
         eprintln!("Error: --emit-behavior-manifest currently requires --emit-nbc");
         std::process::exit(1);
