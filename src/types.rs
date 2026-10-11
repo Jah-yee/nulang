@@ -378,10 +378,14 @@ impl EffectRow {
                 a.extend(b);
                 EffectRow::Open(a, r)
             }
-            (EffectRow::Open(mut a, r1), EffectRow::Open(b, _)) => {
-                // Open rows share the same row variable convention
+            (EffectRow::Open(mut a, r1), EffectRow::Open(b, r2)) => {
                 a.extend(b);
-                EffectRow::Open(a, r1)
+                // Distinct row tails must not be silently identified. Until
+                // the typechecker carries row substitutions, a fresh unknown
+                // tail conservatively over-approximates their union. It must
+                // not be treated as equal to either input variable.
+                let merged_tail = if r1 == r2 { r1 } else { Region::fresh() };
+                EffectRow::Open(a, merged_tail)
             }
         }
     }
