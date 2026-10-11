@@ -223,3 +223,23 @@ fn main() {
         _ => usage(&program),
     }
 }
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    #[test]
+    fn layout_reports_public_fields_inside_actual_actor_bounds() {
+        let actor = Actor::new(1, "actor_1", 0);
+        let fields = actor_field_layout(&actor);
+        let names: Vec<_> = fields.iter().map(|field| field.name).collect();
+
+        assert!(names.contains(&"mailbox"));
+        assert!(names.contains(&"iso_arena"));
+        assert!(names.contains(&"flight_recorder"));
+        assert!(names.contains(&"state_data"));
+        assert!(names.contains(&"held_objects"));
+        assert!(fields.iter().all(|field| field.offset + field.bytes <= size_of::<Actor>()));
+        assert!(fields.windows(2).all(|window| window[0].bytes >= window[1].bytes));
+    }
+}
