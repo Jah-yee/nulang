@@ -26,7 +26,10 @@ impl std::fmt::Display for EffectRowSolveError {
                 write!(f, "incompatible effect rows: {left:?} vs {right:?}")
             }
             Self::CyclicTail(region) => {
-                write!(f, "effect-row tail {region:?} occurs in its own substitution")
+                write!(
+                    f,
+                    "effect-row tail {region:?} occurs in its own substitution"
+                )
             }
         }
     }
@@ -54,7 +57,12 @@ fn union(left: &[Effect], right: &[Effect]) -> Vec<Effect> {
 }
 
 fn difference(left: &[Effect], right: &[Effect]) -> Vec<Effect> {
-    sorted(left.iter().filter(|e| !right.contains(e)).cloned().collect())
+    sorted(
+        left.iter()
+            .filter(|e| !right.contains(e))
+            .cloned()
+            .collect(),
+    )
 }
 
 fn incompatible(left: Vec<Effect>, right: Vec<Effect>) -> EffectRowSolveError {
@@ -113,19 +121,11 @@ impl EffectRowSolver {
 
     /// Bind an unknown tail to a row. Binding to an already constrained
     /// tail unifies with its existing solution, never overwriting it.
-    pub fn bind(
-        &mut self,
-        tail: Region,
-        row: EffectRow,
-    ) -> Result<(), EffectRowSolveError> {
+    pub fn bind(&mut self, tail: Region, row: EffectRow) -> Result<(), EffectRowSolveError> {
         self.atomic(|solver| solver.bind_inner(tail, row))
     }
 
-    fn bind_inner(
-        &mut self,
-        tail: Region,
-        row: EffectRow,
-    ) -> Result<(), EffectRowSolveError> {
+    fn bind_inner(&mut self, tail: Region, row: EffectRow) -> Result<(), EffectRowSolveError> {
         if self.bindings.contains_key(&tail) {
             return self.unify_inner(&EffectRow::Open(vec![], tail), &row);
         }
@@ -181,10 +181,7 @@ impl EffectRowSolver {
                     }
                     // Matching tails can solve differences by constraining
                     // their shared value to contain both sets of effects.
-                    return self.bind_inner(
-                        r1,
-                        EffectRow::Open(union(&a, &b), Region::fresh()),
-                    );
+                    return self.bind_inner(r1, EffectRow::Open(union(&a, &b), Region::fresh()));
                 }
 
                 // {A | r1} = {B | r2}:
@@ -221,10 +218,7 @@ impl EffectRowSolver {
                     .map(|(name, value)| {
                         Ok((
                             name.clone(),
-                            value
-                                .as_ref()
-                                .map(|t| self.apply_to_type(t))
-                                .transpose()?,
+                            value.as_ref().map(|t| self.apply_to_type(t)).transpose()?,
                         ))
                     })
                     .collect::<Result<_, EffectRowSolveError>>()?,
