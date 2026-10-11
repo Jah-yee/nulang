@@ -2950,6 +2950,59 @@ mod tests {
     }
 
     #[test]
+    fn test_effect_row_subset_rejects_unresolved_tail_in_closed_limit() {
+        let allowed = EffectRow::Closed(vec![Effect::IO]);
+        let inferred = EffectRow::Open(vec![Effect::IO], Region::fresh());
+        assert!(
+            !effect_row_subset(&inferred, &allowed),
+            "an open tail can contain effects beyond a closed allowance"
+        );
+
+        let unknown = EffectRow::Open(vec![], Region::fresh());
+        assert!(
+            !effect_row_subset(&unknown, &EffectRow::empty()),
+            "an unknown tail is not a proven pure effect row"
+        );
+    }
+
+    #[test]
+    fn test_effect_row_subset_requires_matching_open_tail() {
+        let shared = Region::fresh();
+        let unrelated = Region::fresh();
+        let inferred = EffectRow::Open(vec![Effect::IO], shared);
+        let compatible = EffectRow::Open(vec![Effect::IO, Effect::FS], shared);
+        let independent = EffectRow::Open(vec![Effect::IO, Effect::FS], unrelated);
+
+        assert!(effect_row_subset(&inferred, &compatible));
+        assert!(
+            !effect_row_subset(&inferred, &independent),
+            "independent open row variables cannot be assumed to be equal"
+        );
+    }
+
+    #[test]
+    fn test_check_effects_rejects_unresolved_direct_callee_row() {
+        let mut checker = EffectChecker::new();
+        checker.fn_rows.insert(
+            "unknown_effects".to_string(),
+            EffectRow::Open(vec![Effect::IO], Region::fresh()),
+        );
+
+        let call = Expr::App {
+            func: Box::new(Expr::Var("unknown_effects".to_string(), s())),
+            args: vec![],
+            span: s(),
+        };
+        let allowed = EffectRow::Closed(vec![Effect::IO]);
+        let result = checker.check_effects(&EffectContext::empty(), &call, &allowed);
+
+        assert!(
+            matches!(result, Err(NuError::EffectError { .. })),
+            "a callee with an unresolved effect tail must not satisfy a closed row"
+        );
+    }
+
+    #[test]
     fn test_effect_row_union() {
         let a = EffectRow::Closed(vec![Effect::IO]);
         let b = EffectRow::Closed(vec![Effect::FS]);
