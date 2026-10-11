@@ -66,6 +66,39 @@ class SelectiveReceiveAbBenchTests(unittest.TestCase):
                 result = bench.criterion_case(binary, target, "first_poll", None, 1.0, 2.0)
             self.assertEqual(result, 1280.5)
 
+    def test_single_cpu_mode_fails_closed_when_taskset_is_missing(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            with patch.object(bench.shutil, "which", return_value=None):
+                with patch.object(bench, "run") as subprocess:
+                    with self.assertRaisesRegex(RuntimeError, "taskset"):
+                        bench.criterion_case(
+                            root / "bench", root / "target", "first_poll",
+                            0, 1.0, 2.0,
+                        )
+                    subprocess.assert_not_called()
+
+    def test_single_cpu_mode_uses_taskset_for_each_criterion_sample(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            target = root / "candidate"
+            def fake_run(command, *, cwd, env):
+                self.assertEqual(command[:3], ["taskset", "-c", "3"])
+                estimate = (target / "criterion" / "actor_selective_receive_empty"
+                            / "first_poll" / "new" / "estimates.json")
+                estimate.parent.mkdir(parents=True, exist_ok=True)
+                estimate.write_text(json.dumps({"median": {"point_estimate": 400.0}}))
+                return "Benchmarking actor/selective_receive_empty/first_poll"
+            with patch.object(bench.shutil, "which", return_value="/usr/bin/taskset"):
+                with patch.object(bench, "run", side_effect=fake_run):
+                    self.assertEqual(
+                        bench.criterion_case(
+                            root / "bench", target, "first_poll", 3, 1.0, 2.0,
+                        ), 400.0,
+                    )
+
     def test_criterion_case_rejects_nonexistent_results_with_diagnostics(self):
         from unittest.mock import patch
         with tempfile.TemporaryDirectory() as td:
