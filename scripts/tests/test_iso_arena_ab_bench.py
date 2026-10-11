@@ -41,6 +41,15 @@ class IsoArenaAbBenchTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 bench.paired_reduction(base, candidate)
 
+    def test_criterion_group_slash_is_sanitized_in_results_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = pathlib.Path(td)
+            expected = home / "actor_iso_arena" / "active_alloc_reset_128" / "new" / "estimates.json"
+            self.assertEqual(
+                bench.criterion_estimate_path(home, "active_alloc_reset_128"),
+                expected,
+            )
+
     def test_criterion_case_uses_isolated_explicit_criterion_home(self):
         from unittest.mock import patch
         with tempfile.TemporaryDirectory() as td:
@@ -49,7 +58,7 @@ class IsoArenaAbBenchTests(unittest.TestCase):
             binary = root / "fake-benchmark"
             def fake_run(command, *, cwd, env):
                 self.assertEqual(env["CRITERION_HOME"], str(target / "criterion"))
-                estimate = target / "criterion" / "actor" / "iso_arena" / "idle_reset_128" / "new" / "estimates.json"
+                estimate = target / "criterion" / "actor_iso_arena" / "idle_reset_128" / "new" / "estimates.json"
                 estimate.parent.mkdir(parents=True, exist_ok=True)
                 estimate.write_text(json.dumps({"median": {"point_estimate": 1280.5}}))
                 return "Benchmarking actor/iso_arena/idle_reset_128"
