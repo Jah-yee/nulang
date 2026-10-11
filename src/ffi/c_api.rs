@@ -814,7 +814,7 @@ mod tests {
         assert_eq!(rc_second, 0);
 
         let source = CString::new(
-            "extern \\"__nulang_registered__\\" { fn nulang_scoped_test_value() -> Int } nulang_scoped_test_value()",
+            "extern \"__nulang_registered__\" { fn nulang_scoped_test_value() -> Int } nulang_scoped_test_value()",
         )
         .unwrap();
         let module_first = unsafe { nulang_compile(first, source.as_ptr()) };
@@ -851,7 +851,7 @@ mod tests {
         assert_eq!(registered, 0);
 
         let source = CString::new(
-            "extern \\"__nulang_registered__\\" { fn nulang_scoped_only_here() -> Int } nulang_scoped_only_here()",
+            "extern \"__nulang_registered__\" { fn nulang_scoped_only_here() -> Int } nulang_scoped_only_here()",
         )
         .unwrap();
         let handle = unsafe { nulang_compile(unregistered, source.as_ptr()) };
