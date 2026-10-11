@@ -1252,9 +1252,81 @@ pub(crate) mod tests {
         path
     }
 
+    // Unlike a finite Cursor, the scripted client stays connected until it
+    // receives the actual terminal DAP event. This affects only tests: real
+    // clients still disconnect on EOF and use the existing bounded shutdown.
+    struct AwaitTerminatedReader {
+        bytes: std::io::Cursor<Vec<u8>>,
+        terminal_rx: std::sync::mpsc::Receiver<()>,
+        finished: bool,
+    }
+
+    impl std::io::Read for AwaitTerminatedReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if buf.is_empty() || self.finished {
+                return Ok(0);
+            }
+            let read = std::io::Read::read(&mut self.bytes, buf)?;
+            if read != 0 {
+                return Ok(read);
+            }
+            self.finished = true;
+            // A generous test failure bound, not a quiescence heuristic for
+            // successful execution. No client EOF is delivered before the
+            // terminal event has actually been written.
+            self.terminal_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "scripted DAP client did not receive terminated event",
+                    )
+                })?;
+            Ok(0)
+        }
+    }
+
+    struct TerminalEventWriter {
+        output: Vec<u8>,
+        terminal_tx: Option<std::sync::mpsc::Sender<()>>,
+    }
+
+    impl std::io::Write for TerminalEventWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.output.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            // write_message flushes after each complete DAP frame. Signal
+            // only for an actual terminal event, never text within output
+            // or a response with a similar name.
+            if self.terminal_tx.is_some()
+                && parse_output(&self.output)
+                    .iter()
+                    .any(|m| m["type"] == "event" && m["event"] == "terminated")
+            {
+                if let Some(tx) = self.terminal_tx.take() {
+                    let _ = tx.send(());
+                }
+            }
+            Ok(())
+        }
+    }
+
     /// Drive a scripted DAP session against `source` and return the framed
     /// output (responses + events) as parsed JSON messages.
     fn run_session(source: &str, script: &[Json]) -> Vec<Json> {
+        run_session_with_mode(source, script, false)
+    }
+
+    /// Test a program's natural termination without simulating client EOF
+    /// before the background debuggee has emitted its terminal events.
+    fn run_session_until_terminated(source: &str, script: &[Json]) -> Vec<Json> {
+        run_session_with_mode(source, script, true)
+    }
+
+    fn run_session_with_mode(source: &str, script: &[Json], await_terminal: bool) -> Vec<Json> {
         let path = write_prog(source);
         let prog = path.to_string_lossy().to_string();
         // Substitute the real temp path for the "<prog>" placeholder in any
@@ -1284,9 +1356,25 @@ pub(crate) mod tests {
         for m in &script {
             send(&mut input, m);
         }
-        let mut output = Vec::new();
-        let reader = std::io::Cursor::new(input);
-        run_dap_server_io(std::io::BufReader::new(reader), &mut output);
+        let output = if await_terminal {
+            let (terminal_tx, terminal_rx) = std::sync::mpsc::channel();
+            let reader = AwaitTerminatedReader {
+                bytes: std::io::Cursor::new(input),
+                terminal_rx,
+                finished: false,
+            };
+            let mut writer = TerminalEventWriter {
+                output: Vec::new(),
+                terminal_tx: Some(terminal_tx),
+            };
+            run_dap_server_io(std::io::BufReader::new(reader), &mut writer);
+            writer.output
+        } else {
+            let mut output = Vec::new();
+            let reader = std::io::Cursor::new(input);
+            run_dap_server_io(std::io::BufReader::new(reader), &mut output);
+            output
+        };
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
         parse_output(&output)
     }
@@ -1325,6 +1413,33 @@ pub(crate) mod tests {
             msgs
         );
         assert_eq!(stopped.unwrap()["body"]["reason"], "breakpoint");
+    }
+
+    #[test]
+    fn test_terminal_event_writer_releases_eof_only_on_terminated_frame() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut writer = TerminalEventWriter {
+            output: Vec::new(),
+            terminal_tx: Some(tx),
+        };
+        write_message(
+            &mut writer,
+            &json!({ "type": "response", "command": "terminated" }),
+        );
+        write_message(
+            &mut writer,
+            &json!({ "type": "event", "event": "exited", "body": { "exitCode": 0 } }),
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        write_message(
+            &mut writer,
+            &json!({ "type": "event", "event": "terminated" }),
+        );
+        assert!(rx.try_recv().is_ok());
+        assert!(writer.terminal_tx.is_none());
     }
 
     #[test]
