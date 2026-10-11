@@ -426,10 +426,8 @@ pub(crate) fn perform_web_builtin(
         Some("route") => Some(crate::vm::Value::unit()),
         Some("redirect") => {
             let url = resolve(constants, *regs.first()?);
-            let out = format!(
-                "<html><head><meta http-equiv=\"refresh\" content=\"0;url={}\"></head></html>",
-                url
-            );
+            let out = crate::web::redirect::render_redirect_fallback(&url);
+            crate::runtime::http_server::note_web_redirect(&url, &out);
             Some(callbacks.alloc_string(&out))
         }
         Some("serve_static") => {
