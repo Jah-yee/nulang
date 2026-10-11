@@ -839,6 +839,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn combined_lazy_arena_and_hibernation_survive_pooled_actor_reset() {
+        let mut actor = Actor::new(99, "old", 0);
+        assert!(!actor.is_hibernated());
+        assert_eq!(actor.iso_arena.total_allocs(), 0);
+
+        let first = actor
+            .iso_arena
+            .alloc(8, crate::runtime::TypeTag::Raw)
+            .expect("valid arena allocation");
+        actor.hibernation_state = Some(Box::new(HibernationState {
+            continuation_bytes: Vec::new(),
+            module_hash: [3; 32],
+            hibernated_at_ms: 12,
+            state_fields: HashMap::new(),
+        }));
+
+        actor.reset(100, "new", 0);
+        assert_eq!(actor.id, 100);
+        assert!(!actor.is_hibernated());
+        assert_eq!(actor.iso_arena.epoch_allocs(), 0);
+        assert_eq!(actor.iso_arena.total_allocs(), 1);
+        assert_eq!(actor.iso_arena.resets(), 1);
+        assert!(actor.iso_arena.contains(first));
+
+        let reused = actor
+            .iso_arena
+            .alloc(8, crate::runtime::TypeTag::Raw)
+            .expect("reset arena must remain usable");
+        assert_eq!(first, reused);
+        assert_eq!(actor.iso_arena.total_allocs(), 2);
+    }
+
+    #[test]
     fn state_only_hibernation_marker_wakes_without_continuation() {
         let mut actor = Actor::new(71, "idle_grain", 0);
         actor.hibernation_state = Some(Box::new(HibernationState {
