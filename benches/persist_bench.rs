@@ -53,7 +53,9 @@ fn bench_memory_store(c: &mut Criterion) {
         b.iter_batched_ref(
             || (MemoryStore::new(), Some(empty_snapshot())),
             |(store, snapshot)| {
-                store.save_snapshot(snapshot.take().expect("fresh benchmark snapshot")).expect("save snapshot");
+                store
+                    .save_snapshot(snapshot.take().expect("fresh benchmark snapshot"))
+                    .expect("save snapshot");
                 black_box(store.load_snapshot(1));
             },
             BatchSize::SmallInput,
@@ -67,7 +69,9 @@ fn bench_memory_store(c: &mut Criterion) {
             b.iter_batched_ref(
                 || (MemoryStore::new(), Some(snapshot_with_payload(bytes))),
                 |(store, snapshot)| {
-                    store.save_snapshot(snapshot.take().expect("fresh benchmark snapshot")).expect("save snapshot");
+                    store
+                        .save_snapshot(snapshot.take().expect("fresh benchmark snapshot"))
+                        .expect("save snapshot");
                     black_box(store.load_snapshot(1));
                 },
                 BatchSize::SmallInput,
