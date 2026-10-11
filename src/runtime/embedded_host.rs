@@ -178,7 +178,7 @@ impl EmbeddedActorHost {
     /// Stop host operations and drop all locally owned actors and their state.
     /// Idempotent; does not persist actor state or await distributed messages.
     pub fn shutdown(&mut self) {
-        drop(self.runtime.take());
+        self.runtime = None;
         self.owned_actors.clear();
     }
 }
