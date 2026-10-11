@@ -40,18 +40,13 @@ enum Kind {
 struct Slot {
     value: Value,
     kind: Kind,
-    // Every Int in this deliberately restricted straight-line backend is
-    // statically known. Retain its value so overflow cannot diverge from
-    // the VM's signed 48-bit arithmetic semantics.
+    // The restricted straight-line backend has no dynamic Int inputs.
+    // Keep each constant's VM-normalized value for compile-time folding.
     constant_int: Option<i64>,
 }
 
-fn checked_int(value: i64) -> NuResult<i64> {
-    if crate::value_layout::int48_in_range(value) {
-        Ok(value)
-    } else {
-        Err(error("integer arithmetic exceeds signed 48-bit range"))
-    }
+fn wrap_int(value: i64) -> i64 {
+    crate::value_layout::sext48((value as u64) & crate::value_layout::PAYLOAD_MASK)
 }
 
 fn lookup(slots: &[Option<Slot>], id: mir::LocalId) -> NuResult<Slot> {
@@ -154,7 +149,7 @@ fn compile_object(mir: &mir::Module) -> NuResult<Vec<u8>> {
                     Slot { value: fb.ins().symbol_value(ptr_ty, global), kind: Kind::String, constant_int: None }
                 }
                 RValue::Const(Constant::Int(n)) => {
-                    let value = checked_int(*n)?;
+                    let value = wrap_int(*n);
                     Slot {
                         value: fb.ins().iconst(types::I64, value),
                         kind: Kind::Int,
@@ -173,14 +168,11 @@ fn compile_object(mir: &mir::Module) -> NuResult<Vec<u8>> {
                         return Err(error("unary negation of non-Int"));
                     }
                     let raw = x.constant_int.ok_or_else(|| error("unknown integer value"))?;
-                    let negated = raw
-                        .checked_neg()
-                        .ok_or_else(|| error("integer arithmetic exceeds signed 48-bit range"))?;
-                    let checked = checked_int(negated)?;
+                    let result = wrap_int(raw.wrapping_neg());
                     Slot {
-                        value: fb.ins().ineg(x.value),
+                        value: fb.ins().iconst(types::I64, result),
                         kind: Kind::Int,
-                        constant_int: Some(checked),
+                        constant_int: Some(result),
                     }
                 }
                 RValue::Binary(operator, lhs, rhs) => {
@@ -191,16 +183,17 @@ fn compile_object(mir: &mir::Module) -> NuResult<Vec<u8>> {
                     }
                     let lhs = a.constant_int.ok_or_else(|| error("unknown integer value"))?;
                     let rhs = b.constant_int.ok_or_else(|| error("unknown integer value"))?;
-                    let (value, result) = match operator {
-                        BinOp::Add => (fb.ins().iadd(a.value, b.value), lhs.checked_add(rhs)),
-                        BinOp::Sub => (fb.ins().isub(a.value, b.value), lhs.checked_sub(rhs)),
-                        BinOp::Mul => (fb.ins().imul(a.value, b.value), lhs.checked_mul(rhs)),
+                    let result = wrap_int(match operator {
+                        BinOp::Add => lhs.wrapping_add(rhs),
+                        BinOp::Sub => lhs.wrapping_sub(rhs),
+                        BinOp::Mul => lhs.wrapping_mul(rhs),
                         _ => return Err(error(format!("binary operator {operator:?}"))),
-                    };
-                    let result = result
-                        .ok_or_else(|| error("integer arithmetic exceeds signed 48-bit range"))?;
-                    let checked = checked_int(result)?;
-                    Slot { value, kind: Kind::Int, constant_int: Some(checked) }
+                    });
+                    Slot {
+                        value: fb.ins().iconst(types::I64, result),
+                        kind: Kind::Int,
+                        constant_int: Some(result),
+                    }
                 }
                 RValue::Perform { effect, op, args, resolved_handler: None }
                     if effect == "IO" && (op == "print" || op == "println") && args.len() == 1 =>
@@ -277,4 +270,18 @@ pub fn emit_executable(mir: &mir::Module, output: &Path) -> NuResult<()> {
 #[cfg(not(target_os = "linux"))]
 pub fn emit_executable(_mir: &mir::Module, _output: &Path) -> NuResult<()> {
     Err(error("native executable linking is currently Linux-only"))
+}
+
+#[cfg(test)]
+mod integer_semantics_tests {
+    use super::wrap_int;
+    use crate::value_layout::{INT48_MAX, INT48_MIN};
+
+    #[test]
+    fn integer_arithmetic_wraps_at_signed_48bit_boundary() {
+        assert_eq!(wrap_int(INT48_MAX.wrapping_add(1)), INT48_MIN);
+        assert_eq!(wrap_int(INT48_MIN.wrapping_sub(1)), INT48_MAX);
+        assert_eq!(wrap_int(INT48_MIN.wrapping_neg()), INT48_MIN);
+        assert_eq!(wrap_int(INT48_MAX.wrapping_mul(2)), -2);
+    }
 }
