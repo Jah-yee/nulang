@@ -33,8 +33,10 @@ shared-library ABI. Native Linux CI runs the CLI smoke test and native release
 tests with the same profile. The `publish` job
 creates a GitHub Release with:
 
-- one `nulang-<platform>-<arch>.tar.gz` archive per supported target; the
-  executable is `nulang` on Unix and `nulang.exe` on Windows
+- one `nulang-<platform>-<arch>.tar.gz` archive per supported target.
+  The **member inside the tarball** is platform-qualified too (for example,
+  `nulang-linux-x86_64`). Rename the extracted executable to `nulang`
+  on Unix, or `nulang.exe` on Windows, before using normal CLI commands.
 - a `.sha256` checksum per tarball
 - auto-generated release notes
 
@@ -59,10 +61,16 @@ creates a GitHub Release with:
 - Smoke-test one artifact:
 
   ```bash
-  curl -LO https://github.com/nulang-org/nulang/releases/download/v0.2.0/nulang-linux-x86_64.tar.gz
+  # Replace TAG with the actual published version (after release).
+  TAG="v0.2.0"
+  BASE="https://github.com/nulang-org/nulang/releases/download/$TAG"
+  curl -fL -O "$BASE/nulang-linux-x86_64.tar.gz"
+  curl -fL -O "$BASE/nulang-linux-x86_64.tar.gz.sha256"
   sha256sum -c nulang-linux-x86_64.tar.gz.sha256
   tar xzf nulang-linux-x86_64.tar.gz
-  ./nulang --version   # must print the version you just tagged
+  mv nulang-linux-x86_64 nulang
+  chmod +x nulang
+  ./nulang --version   # must print the version just tagged
   ./nulang --eval 'perform IO.print("release works")'
   ```
 
