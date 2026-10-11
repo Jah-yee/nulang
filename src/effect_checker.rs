@@ -4958,6 +4958,123 @@ mod tests {
     }
 
     #[test]
+    fn test_callback_alias_is_charged_when_invoked() {
+        let callback_type = Type::Function {
+            param: Box::new(Type::Tuple(vec![])),
+            ret: Box::new(Type::unit()),
+            effect: EffectRow::singleton(Effect::IO),
+            cap: Capability::Ref,
+        };
+        let lambda = Expr::Lambda {
+            params: vec![Param::new("cb", Some(callback_type))],
+            ret_type: None,
+            body: Box::new(Expr::Let {
+                name: "alias".to_string(),
+                ty: None,
+                value: Box::new(Expr::Var("cb".to_string(), s())),
+                body: Box::new(Expr::App {
+                    func: Box::new(Expr::Var("alias".to_string(), s())),
+                    args: vec![],
+                    span: s(),
+                }),
+                mutable: false,
+                let_in: false,
+                span: s(),
+            }),
+            effect: Some(EffectRow::empty()),
+            span: s(),
+        };
+        let mut checker = EffectChecker::new();
+        assert!(
+            checker.infer_effects(&EffectContext::empty(), &lambda).is_err(),
+            "binding and invoking an IO callback alias must not bypass purity"
+        );
+    }
+
+    #[test]
+    fn test_callback_alias_chain_is_charged_when_invoked() {
+        let callback_type = Type::Function {
+            param: Box::new(Type::Tuple(vec![])),
+            ret: Box::new(Type::unit()),
+            effect: EffectRow::singleton(Effect::IO),
+            cap: Capability::Ref,
+        };
+        let alias_call = Expr::App {
+            func: Box::new(Expr::Var("second".to_string(), s())),
+            args: vec![],
+            span: s(),
+        };
+        let alias2 = Expr::Let {
+            name: "second".to_string(),
+            ty: None,
+            value: Box::new(Expr::Var("first".to_string(), s())),
+            body: Box::new(alias_call),
+            mutable: false,
+            let_in: false,
+            span: s(),
+        };
+        let alias1 = Expr::Let {
+            name: "first".to_string(),
+            ty: None,
+            value: Box::new(Expr::Var("cb".to_string(), s())),
+            body: Box::new(alias2),
+            mutable: false,
+            let_in: false,
+            span: s(),
+        };
+        let lambda = Expr::Lambda {
+            params: vec![Param::new("cb", Some(callback_type))],
+            ret_type: None,
+            body: Box::new(alias1),
+            effect: Some(EffectRow::empty()),
+            span: s(),
+        };
+        let mut checker = EffectChecker::new();
+        assert!(
+            checker.infer_effects(&EffectContext::empty(), &lambda).is_err(),
+            "transitive local aliases must keep the callback's effect"
+        );
+    }
+
+    #[test]
+    fn test_actor_behavior_callback_parameter_respects_effect_contract() {
+        let mut ast = parse_module(
+            "actor Counter { state count = 0 behavior get() { self.count } }",
+        );
+        let Decl::Actor { behaviors, .. } = &mut ast.decls[0] else {
+            panic!("expected actor declaration");
+        };
+        let callback_type = Type::Function {
+            param: Box::new(Type::Tuple(vec![])),
+            ret: Box::new(Type::unit()),
+            effect: EffectRow::singleton(Effect::IO),
+            cap: Capability::Ref,
+        };
+        behaviors[0].params = vec![Param::new("cb", Some(callback_type))];
+        behaviors[0].body = Expr::App {
+            func: Box::new(Expr::Var("cb".to_string(), s())),
+            args: vec![],
+            span: s(),
+        };
+        behaviors[0].effect = Some(EffectRow::empty());
+        let mut checker = EffectChecker::new();
+        assert!(
+            checker.check_decl(&ast.decls[0]).is_err(),
+            "pure actor behavior cannot invoke an IO callback"
+        );
+
+        let Decl::Actor { behaviors, .. } = &mut ast.decls[0] else {
+            unreachable!();
+        };
+        behaviors[0].effect = Some(EffectRow::singleton(Effect::IO));
+        let mut checker = EffectChecker::new();
+        assert!(
+            checker.check_decl(&ast.decls[0]).is_ok(),
+            "actor behavior can invoke an IO callback when the contract permits it"
+        );
+    }
+
+    #[test]
     fn test_state_machine_effect_checks_desugared_form() {
         // Hooks and the generated transition bodies are effect-checked
         // exactly like actor behaviors: the `perform IO.print` in the entry
