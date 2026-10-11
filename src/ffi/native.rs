@@ -303,6 +303,20 @@ mod tests {
     }
 
     #[test]
+    fn test_missing_registered_callback_never_falls_back_to_library_loading() {
+        let mut registry = FfiRegistry::new();
+        let err = unsafe {
+            registry.resolve_or_load(
+                "__nulang_registered__",
+                "callback_missing_in_this_runtime",
+                Signature::new(vec![], CType::I64),
+            )
+        }
+        .unwrap_err();
+        assert!(err.contains("not registered"), "{err}");
+    }
+
+    #[test]
     fn test_registered_callback_rejects_incompatible_declared_signature() {
         let mut registry = FfiRegistry::new();
         let function = unsafe {
