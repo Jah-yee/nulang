@@ -153,11 +153,14 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Build (release)
-        run: cargo build --locked --release
+      - name: Build (public CLI release profile)
+        run: cargo build --locked --release --no-default-features --features release-cli --bin nulang
 
-      - name: Test (release)
-        run: cargo test --locked --release
+      - name: Test (same profile as public release artifacts)
+        run: cargo test --locked --release --no-default-features --features release-cli
+
+      - name: Verify Linux CLI has no Python ABI linkage
+        run: bash scripts/check_release_linux.sh /tmp/cargo-target/release/nulang
 
       - name: Stage tested release binary
         run: |
@@ -229,13 +232,6 @@ jobs:
 
       - name: Test
         run: cargo test --locked --no-default-features
-
-      # Validate the exact feature profile used by public release artifacts,
-      # without installing python3-dev on this runner.
-      - name: Build and smoke Linux release CLI without Python linkage
-        run: |
-          cargo build --locked --release --no-default-features --features release-cli --bin nulang
-          bash scripts/check_release_linux.sh /tmp/cargo-target/release/nulang
 
       - name: Check zero warnings
         run: cargo check --locked --tests --no-default-features
