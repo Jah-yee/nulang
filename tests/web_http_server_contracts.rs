@@ -196,3 +196,31 @@ fn web_redirect_returns_real_303_over_http() {
     assert!(response.contains("\r\nLocation: /receipt?ok=yes\r\n"), "{response}");
     assert_eq!(response_body(&response), "");
 }
+
+#[test]
+fn relative_web_redirect_preserves_legacy_html_fallback() {
+    let (module, function_index) = compile_handler(
+        "fn redirect_page() { perform Web.redirect(\"receipt\") }",
+        "redirect_page",
+    );
+    let server = WebDevServer::bind(
+        0,
+        None,
+        None,
+        vec![WebRoute {
+            method: HttpMethod::Get,
+            path: "/relative".to_string(),
+            handler_module: module,
+            handler_func_idx: function_index,
+        }],
+    )
+    .expect("bind relative redirect WebDevServer");
+
+    let response = send_raw_request(
+        server.port,
+        "GET /relative HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    assert!(response_body(&response).contains("http-equiv=\"refresh\""));
+    assert!(response_body(&response).contains("url=receipt"));
+}
