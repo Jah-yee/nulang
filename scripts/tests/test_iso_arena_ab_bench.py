@@ -41,6 +41,30 @@ class IsoArenaAbBenchTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 bench.paired_reduction(base, candidate)
 
+    def test_criterion_case_uses_isolated_explicit_criterion_home(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            target = root / "candidate"
+            binary = root / "fake-benchmark"
+            def fake_run(command, *, cwd, env):
+                self.assertEqual(env["CRITERION_HOME"], str(target / "criterion"))
+                estimate = target / "criterion" / "actor" / "iso_arena" / "idle_reset_128" / "new" / "estimates.json"
+                estimate.parent.mkdir(parents=True, exist_ok=True)
+                estimate.write_text(json.dumps({"median": {"point_estimate": 1280.5}}))
+                return "Benchmarking actor/iso_arena/idle_reset_128"
+            with patch.object(bench, "run", side_effect=fake_run):
+                result = bench.criterion_case(binary, target, "idle_reset_128", None, 1.0, 2.0)
+            self.assertEqual(result, 1280.5)
+
+    def test_criterion_case_rejects_nonexistent_results_with_diagnostics(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            with patch.object(bench, "run", return_value="Benchmarking a different case"):
+                with self.assertRaisesRegex(RuntimeError, "idle_reset_128"):
+                    bench.criterion_case(root / "bench", root / "target", "idle_reset_128", None, 1.0, 2.0)
+
     def test_counterbalanced_run_order(self):
         self.assertEqual(bench.variant_order(0), ("base", "candidate"))
         self.assertEqual(bench.variant_order(1), ("candidate", "base"))
