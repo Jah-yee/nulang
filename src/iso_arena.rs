@@ -654,6 +654,41 @@ mod tests {
     // -- Arena mechanics ----------------------------------------------------
 
     #[test]
+    fn idle_arena_keeps_cold_allocation_metadata_out_of_actor() {
+        assert!(
+            std::mem::size_of::<IsoArena>() <= 2 * std::mem::size_of::<usize>(),
+            "idle arena should hold no inline block vector or epoch cursors"
+        );
+        let a = IsoArena::new();
+        assert!(!a.has_allocated_blocks());
+        assert_eq!(a.epoch_allocs(), 0);
+        assert_eq!(a.total_allocs(), 0);
+        assert!(!a.contains(std::ptr::null()));
+    }
+
+    #[test]
+    fn resetting_unused_arena_does_not_allocate_and_keeps_reset_count() {
+        let mut a = IsoArena::new();
+        a.reset();
+        a.reset();
+        assert_eq!(a.resets(), 2);
+        assert!(!a.has_allocated_blocks());
+        assert_eq!(a.total_allocs(), 0);
+
+        let ptr = a.alloc(16, TypeTag::Array).unwrap();
+        assert!(a.has_allocated_blocks());
+        assert!(a.contains(ptr));
+        assert_eq!(a.epoch_allocs(), 1);
+        assert_eq!(a.total_allocs(), 1);
+        assert_eq!(a.resets(), 2);
+        a.reset();
+        assert_eq!(a.resets(), 3);
+        assert_eq!(a.epoch_allocs(), 0);
+        assert_eq!(a.total_allocs(), 1);
+        assert_eq!(ptr, a.alloc(16, TypeTag::Array).unwrap());
+    }
+
+    #[test]
     fn arena_alloc_write_header_and_len() {
         let mut a = IsoArena::new();
         let p = a
