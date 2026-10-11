@@ -238,10 +238,15 @@ pub fn emit_executable(mir: &mir::Module, output: &Path) -> NuResult<()> {
     let parent = output.parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
+    // Resolve the parent before forming linker arguments. A relative output
+    // directory such as "-native-output" would otherwise turn the staged
+    // object path into an option-like argument for cc/ld.
+    let parent = std::fs::canonicalize(parent)
+        .map_err(|e| error(format!("resolve output directory: {e}")))?;
     // A private, exclusive directory avoids predictable .o/.tmp names and
     // symlink-following writes in attacker-controlled directories.
     let staging = tempfile::Builder::new().prefix(".nulang-link-")
-        .tempdir_in(parent)
+        .tempdir_in(&parent)
         .map_err(|e| error(format!("create staging directory: {e}")))?;
     let object_path = staging.path().join("main.o");
     let temporary_exe = staging.path().join("main");
