@@ -1,7 +1,7 @@
 //! End-to-end native object/linker smoke tests. Host-libc executable; Linux only.
 //! These tests intentionally exercise the compiler CLI rather than the VM.
 
-#![cfg(all(target_os = "linux", feature = "native-codegen"))]
+#![cfg(all(target_os = "linux", feature = "native-executable"))]
 
 use std::fs;
 use std::path::{Path, PathBuf};
