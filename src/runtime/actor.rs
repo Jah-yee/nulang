@@ -942,7 +942,10 @@ mod tests {
         recorder.record(7, 3, &[Value::int(42)]);
 
         assert_eq!(recorder.len(), 1);
-        assert!(recorder.storage.as_ref().is_some_and(|storage| storage.entries.capacity() > 0));
+        assert!(recorder
+            .storage
+            .as_ref()
+            .is_some_and(|storage| storage.entries.capacity() > 0));
         assert_eq!(recorder.entries()[0].sender, 7);
         assert_eq!(recorder.entries()[0].behavior_id, 3);
         assert_eq!(recorder.entries()[0].payload_summary, "42");
@@ -970,7 +973,10 @@ mod tests {
         recorder.record(12, 2, &[Value::int(2)]);
         recorder.record(13, 3, &[Value::int(3)]);
         let ordered = recorder.ordered_entries();
-        assert_eq!(ordered.iter().map(|entry| entry.seq).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(
+            ordered.iter().map(|entry| entry.seq).collect::<Vec<_>>(),
+            [1, 2]
+        );
         assert_eq!(
             ordered.iter().map(|entry| entry.sender).collect::<Vec<_>>(),
             [12, 13]
@@ -978,7 +984,11 @@ mod tests {
 
         let cloned = recorder.clone();
         assert_eq!(
-            cloned.ordered_entries().iter().map(|entry| entry.seq).collect::<Vec<_>>(),
+            cloned
+                .ordered_entries()
+                .iter()
+                .map(|entry| entry.seq)
+                .collect::<Vec<_>>(),
             [1, 2]
         );
 
