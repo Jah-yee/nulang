@@ -1017,6 +1017,8 @@ mod tests {
             // nightly differential failure (run 38128664013).
             // Wrapping these in fn main may change lowering and miss the bug.
             "-3 ** -2",
+            // Shard 2 additionally found interpreter/WASM string conversion drift.
+            "let x = 1; let y = 2let a = [\"x\", \"y\"]; a[0] + y",
             "--(1 + 2,)",
             "-fn(x) { x + 1 }",
             "fn pick(b) { if b then 1 else -1 }; pick(true) * pick(-false)",
