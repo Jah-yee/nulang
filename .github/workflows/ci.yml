@@ -201,7 +201,7 @@ jobs:
 
       - name: Crash and restart the native durable job demo
         run: |
-          ./target/release/nulang --with=fs --check examples/durable_job/job.nula
+          ./target/release/nulang --with fs --check examples/durable_job/job.nula
           python3 examples/durable_job/run_demo.py --nulang-bin ./target/release/nulang
 
       - name: Scaffold test package
