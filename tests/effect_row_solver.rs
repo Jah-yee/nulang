@@ -31,7 +31,10 @@ fn open_row_tail_can_be_closed_by_a_matching_concrete_row() {
         solver.resolve(&open(&[Effect::IO], tail)).unwrap(),
         closed(&[Effect::FS, Effect::IO])
     );
-    assert_eq!(solver.resolve(&open(&[], tail)).unwrap(), closed(&[Effect::FS]));
+    assert_eq!(
+        solver.resolve(&open(&[], tail)).unwrap(),
+        closed(&[Effect::FS])
+    );
 }
 
 #[test]
@@ -86,7 +89,10 @@ fn common_tail_with_different_explicit_effects_can_be_constrained() {
 
     solver.unify(&left, &right).unwrap();
 
-    assert_eq!(solver.resolve(&left).unwrap(), solver.resolve(&right).unwrap());
+    assert_eq!(
+        solver.resolve(&left).unwrap(),
+        solver.resolve(&right).unwrap()
+    );
 }
 
 #[test]
@@ -96,13 +102,22 @@ fn occurs_check_rejects_recursive_bindings_without_mutating_state() {
     let mut solver = EffectRowSolver::new();
 
     let self_cycle = solver.bind(first, open(&[Effect::IO], first));
-    assert!(matches!(self_cycle, Err(EffectRowSolveError::CyclicTail(_))));
+    assert!(matches!(
+        self_cycle,
+        Err(EffectRowSolveError::CyclicTail(_))
+    ));
     assert_eq!(solver.resolve(&open(&[], first)).unwrap(), open(&[], first));
 
     solver.bind(first, open(&[], second)).unwrap();
     let mutual_cycle = solver.bind(second, open(&[], first));
-    assert!(matches!(mutual_cycle, Err(EffectRowSolveError::CyclicTail(_))));
-    assert_eq!(solver.resolve(&open(&[], second)).unwrap(), open(&[], second));
+    assert!(matches!(
+        mutual_cycle,
+        Err(EffectRowSolveError::CyclicTail(_))
+    ));
+    assert_eq!(
+        solver.resolve(&open(&[], second)).unwrap(),
+        open(&[], second)
+    );
 }
 
 #[test]
@@ -131,10 +146,7 @@ fn solver_applies_bindings_to_nested_callback_types() {
         effect: open(&[Effect::IO], tail),
         cap: Capability::Ref,
     };
-    let nested = Type::Array(Box::new(Type::Record(vec![(
-        "cb".to_string(),
-        callback,
-    )])));
+    let nested = Type::Array(Box::new(Type::Record(vec![("cb".to_string(), callback)])));
     let mut solver = EffectRowSolver::new();
     solver.bind(tail, closed(&[Effect::FS])).unwrap();
 
