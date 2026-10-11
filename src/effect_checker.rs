@@ -476,6 +476,9 @@ pub struct EffectChecker {
     /// same-named module function, so calls through it are not charged the
     /// module function's effect row.
     shadowed: Vec<String>,
+    /// Lexically scoped callable parameter effects. A None entry shadows an
+    /// outer binding without claiming that the local callable is pure.
+    scoped_function_rows: Vec<(String, Option<EffectRow>)>,
     /// Granted resource-capability categories (`fs`, `net`, `os`). `None`
     /// means no gate is active (standalone programs run with full access).
     /// `Some(grants)` means a resource effect is only legal when its category
@@ -502,6 +505,7 @@ impl EffectChecker {
             diagnostics: Vec::new(),
             fn_rows: FxHashMap::default(),
             shadowed: Vec::new(),
+            scoped_function_rows: Vec::new(),
             resource_grants: None,
         }
     }
@@ -522,9 +526,38 @@ impl EffectChecker {
         expr: &Expr,
     ) -> NuResult<EffectRow> {
         let base = self.shadowed.len();
+        let row_base = self.scoped_function_rows.len();
         self.shadowed.extend(names.iter().cloned());
+        self.scoped_function_rows
+            .extend(names.iter().map(|name| (name.clone(), None)));
         let result = self.infer_effects(ctx, expr);
+        self.scoped_function_rows.truncate(row_base);
         self.shadowed.truncate(base);
+        result
+    }
+
+    /// Resolve the declared effect row of a callback parameter within its
+    /// lexical scope. Shadowing is recorded even for untyped parameters so
+    /// that their names cannot acquire effects from an outer binding.
+    fn with_param_scope<T>(
+        &mut self,
+        params: &[Param],
+        work: impl FnOnce(&mut Self) -> NuResult<T>,
+    ) -> NuResult<T> {
+        let name_base = self.shadowed.len();
+        let row_base = self.scoped_function_rows.len();
+        for param in params {
+            self.shadowed.push(param.name.clone());
+            let callable_row = match param.ty.as_ref() {
+                Some(Type::Function { effect, .. }) => Some(effect.clone()),
+                _ => None,
+            };
+            self.scoped_function_rows
+                .push((param.name.clone(), callable_row));
+        }
+        let result = work(self);
+        self.scoped_function_rows.truncate(row_base);
+        self.shadowed.truncate(name_base);
         result
     }
 
@@ -555,17 +588,15 @@ impl EffectChecker {
                 effect,
                 ..
             } => {
-                let base = self.shadowed.len();
-                self.shadowed.extend(params.iter().map(|p| p.name.clone()));
-                let result = if let Some(ann) = effect {
-                    let lambda_ctx = EffectContext::with_allowed(ann.clone());
-                    self.check_effects(&lambda_ctx, body, ann)
-                        .map(|_| ann.clone())
-                } else {
-                    self.infer_effects(ctx, body)
-                };
-                self.shadowed.truncate(base);
-                result
+                self.with_param_scope(params, |checker| {
+                    if let Some(ann) = effect {
+                        let lambda_ctx = EffectContext::with_allowed(ann.clone());
+                        checker.check_effects(&lambda_ctx, body, ann)?;
+                        Ok(ann.clone())
+                    } else {
+                        checker.infer_effects(ctx, body)
+                    }
+                })
             }
 
             // Application: effects of function + arguments, plus the callee's
@@ -578,10 +609,17 @@ impl EffectChecker {
                     row = effect_row_union(&row, &self.infer_effects(ctx, arg)?);
                 }
                 if let Expr::Var(name, _) = func.as_ref() {
-                    if !self.shadowed.contains(name) {
-                        if let Some(callee_row) = self.fn_rows.get(name) {
+                    if self.shadowed.contains(name) {
+                        if let Some((_, Some(callee_row))) = self
+                            .scoped_function_rows
+                            .iter()
+                            .rev()
+                            .find(|(local, _)| local == name)
+                        {
                             row = effect_row_union(&row, callee_row);
                         }
+                    } else if let Some(callee_row) = self.fn_rows.get(name) {
+                        row = effect_row_union(&row, callee_row);
                     }
                 }
                 Ok(row)
@@ -1031,11 +1069,14 @@ impl EffectChecker {
                 if let Decl::Function {
                     name,
                     effect: None,
+                    params,
                     body,
                     ..
                 } = decl
                 {
-                    let inferred = self.infer_effects(&ctx, body)?;
+                    let inferred = self.with_param_scope(params, |checker| {
+                        checker.infer_effects(&ctx, body)
+                    })?;
                     let entry = self
                         .fn_rows
                         .entry(name.clone())
@@ -1065,10 +1106,15 @@ impl EffectChecker {
     pub fn check_decl(&mut self, decl: &Decl) -> NuResult<()> {
         let ctx = EffectContext::empty();
         match decl {
-            Decl::Function { body, effect, .. } => match effect {
-                Some(allowed) => self.check_effects(&ctx, body, allowed),
-                None => self.infer_effects(&ctx, body).map(|_| ()),
-            },
+            Decl::Function {
+                body,
+                effect,
+                params,
+                ..
+            } => self.with_param_scope(params, |checker| match effect {
+                Some(allowed) => checker.check_effects(&ctx, body, allowed),
+                None => checker.infer_effects(&ctx, body).map(|_| ()),
+            }),
             Decl::Actor {
                 behaviors,
                 state_fields,
