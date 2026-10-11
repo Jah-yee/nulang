@@ -925,6 +925,29 @@ mod transactional_receive_tests {
     }
 
     #[test]
+    fn empty_selective_receive_avoids_index_allocation_and_observes_later_arrival() {
+        let mut mb = Mailbox::new(1);
+        for _ in 0..32 {
+            assert!(mb.receive_match(&[7]).is_none());
+            assert!(
+                mb.receive_indexes.is_none(),
+                "an empty receive must not allocate per-lane indexes"
+            );
+            assert_eq!(mb.len(), 0);
+        }
+
+        mb.push_local(msg(7, 41, MessagePriority::Normal))
+            .expect("a new message fits after an empty poll");
+        let (arm, payload) = mb.receive_match(&[7]).expect("later arrival is visible");
+        assert_eq!(arm, 0);
+        assert_eq!(payload[0].as_int(), Some(41));
+        assert_eq!(mb.len(), 1, "candidate must remain capacity-accounted");
+        assert!(mb.receive_indexes.is_some());
+        assert_eq!(mb.commit_receive_match().expect("commit"), payload);
+        assert!(mb.is_empty(), "committing the candidate releases the slot");
+    }
+
+    #[test]
     fn indexed_receive_sees_arrival_after_initial_miss() {
         let mut mb = Mailbox::new(8);
         mb.push_local(msg(1, 1, MessagePriority::Normal)).unwrap();
