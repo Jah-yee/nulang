@@ -621,6 +621,21 @@ mod authority_tests {
     use crate::bytecode::CodeModule;
     use crate::runtime::persistence::PersistenceStore;
 
+    #[test]
+    fn spawn_from_pool_reuses_default_name_buffer() {
+        let mut rt = Runtime::new();
+        let pooled = Actor::new(1, "actor_00000000000000000000", 0);
+        let name_ptr = pooled.name.as_ptr();
+        rt.actor_pool.push(pooled);
+
+        let id = rt.spawn_actor(Box::new(Vec::new));
+        let actor = rt.actors.get(&id).expect("spawned pooled actor");
+        assert_eq!(actor.name, format!("actor_{id}"));
+        assert_eq!(actor.name.as_ptr(), name_ptr);
+        assert_eq!(actor.id, id);
+        assert_eq!(actor.state, crate::runtime::ActorState::Running);
+    }
+
     fn secret_manifest(name: &str) -> AuthorityManifest {
         AuthorityManifest::from_tokens([format!("Secret::Read({name})")].iter().map(String::as_str))
             .unwrap()
