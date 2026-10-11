@@ -561,6 +561,43 @@ impl EffectChecker {
         result
     }
 
+    /// Find the declared effects of a locally scoped callback or an
+    /// unshadowed module function. An explicit None entry stops lookup:
+    /// a same-named pure binding cannot inherit an outer effectful row.
+    fn known_callable_row(&self, name: &str) -> Option<EffectRow> {
+        if let Some((_, row)) = self
+            .scoped_function_rows
+            .iter()
+            .rev()
+            .find(|(bound, _)| bound == name)
+        {
+            return row.clone();
+        }
+        if self.shadowed.contains(&name.to_string()) {
+            return None;
+        }
+        self.fn_rows.get(name).cloned()
+    }
+
+    /// Infer a body with a local alias that may carry a callable effect
+    /// annotation. Keep the binding scoped even when the row is unknown.
+    fn infer_with_callable_bound(
+        &mut self,
+        ctx: &EffectContext,
+        name: &str,
+        callable: Option<EffectRow>,
+        body: &Expr,
+    ) -> NuResult<EffectRow> {
+        let name_base = self.shadowed.len();
+        let row_base = self.scoped_function_rows.len();
+        self.shadowed.push(name.to_string());
+        self.scoped_function_rows.push((name.to_string(), callable));
+        let inferred = self.infer_effects(ctx, body);
+        self.scoped_function_rows.truncate(row_base);
+        self.shadowed.truncate(name_base);
+        inferred
+    }
+
     /// Infer the effect row of an expression.
     ///
     /// Returns the (upper-bound) effect row describing what effects the
@@ -607,17 +644,8 @@ impl EffectChecker {
                     row = effect_row_union(&row, &self.infer_effects(ctx, arg)?);
                 }
                 if let Expr::Var(name, _) = func.as_ref() {
-                    if self.shadowed.contains(name) {
-                        if let Some((_, Some(callee_row))) = self
-                            .scoped_function_rows
-                            .iter()
-                            .rev()
-                            .find(|(local, _)| local == name)
-                        {
-                            row = effect_row_union(&row, callee_row);
-                        }
-                    } else if let Some(callee_row) = self.fn_rows.get(name) {
-                        row = effect_row_union(&row, callee_row);
+                    if let Some(callee_row) = self.known_callable_row(name) {
+                        row = effect_row_union(&row, &callee_row);
                     }
                 }
                 Ok(row)
@@ -629,7 +657,17 @@ impl EffectChecker {
                 name, value, body, ..
             } => {
                 let val_row = self.infer_effects(ctx, value)?;
-                let body_row = self.infer_with_bound(ctx, std::slice::from_ref(name), body)?;
+                // Capture only statically known callable provenance. An
+                // unrelated local binding remains an explicit shadow.
+                let callable = match value.as_ref() {
+                    Expr::Var(source, _) => self.known_callable_row(source),
+                    Expr::Lambda {
+                        effect: Some(effect),
+                        ..
+                    } => Some(effect.clone()),
+                    _ => None,
+                };
+                let body_row = self.infer_with_callable_bound(ctx, name, callable, body)?;
                 Ok(effect_row_union(&val_row, &body_row))
             }
 
@@ -1119,10 +1157,10 @@ impl EffectChecker {
                 ..
             } => {
                 for b in behaviors {
-                    match &b.effect {
-                        Some(allowed) => self.check_effects(&ctx, &b.body, allowed)?,
-                        None => self.infer_effects(&ctx, &b.body).map(|_| ())?,
-                    }
+                    self.with_param_scope(&b.params, |checker| match &b.effect {
+                        Some(allowed) => checker.check_effects(&ctx, &b.body, allowed),
+                        None => checker.infer_effects(&ctx, &b.body).map(|_| ()),
+                    })?;
                 }
                 for (_, _, _, default) in state_fields {
                     self.infer_effects(&ctx, default)?;
@@ -4954,6 +4992,123 @@ mod tests {
                 .infer_effects(&EffectContext::empty(), &lambda)
                 .is_ok(),
             "locally shadowed pure closure must not inherit an outer callback's effects"
+        );
+    }
+
+    #[test]
+    fn test_callback_alias_is_charged_when_invoked() {
+        let callback_type = Type::Function {
+            param: Box::new(Type::Tuple(vec![])),
+            ret: Box::new(Type::unit()),
+            effect: EffectRow::singleton(Effect::IO),
+            cap: Capability::Ref,
+        };
+        let lambda = Expr::Lambda {
+            params: vec![Param::new("cb", Some(callback_type))],
+            ret_type: None,
+            body: Box::new(Expr::Let {
+                name: "alias".to_string(),
+                ty: None,
+                value: Box::new(Expr::Var("cb".to_string(), s())),
+                body: Box::new(Expr::App {
+                    func: Box::new(Expr::Var("alias".to_string(), s())),
+                    args: vec![],
+                    span: s(),
+                }),
+                mutable: false,
+                let_in: false,
+                span: s(),
+            }),
+            effect: Some(EffectRow::empty()),
+            span: s(),
+        };
+        let mut checker = EffectChecker::new();
+        assert!(
+            checker.infer_effects(&EffectContext::empty(), &lambda).is_err(),
+            "binding and invoking an IO callback alias must not bypass purity"
+        );
+    }
+
+    #[test]
+    fn test_callback_alias_chain_is_charged_when_invoked() {
+        let callback_type = Type::Function {
+            param: Box::new(Type::Tuple(vec![])),
+            ret: Box::new(Type::unit()),
+            effect: EffectRow::singleton(Effect::IO),
+            cap: Capability::Ref,
+        };
+        let alias_call = Expr::App {
+            func: Box::new(Expr::Var("second".to_string(), s())),
+            args: vec![],
+            span: s(),
+        };
+        let alias2 = Expr::Let {
+            name: "second".to_string(),
+            ty: None,
+            value: Box::new(Expr::Var("first".to_string(), s())),
+            body: Box::new(alias_call),
+            mutable: false,
+            let_in: false,
+            span: s(),
+        };
+        let alias1 = Expr::Let {
+            name: "first".to_string(),
+            ty: None,
+            value: Box::new(Expr::Var("cb".to_string(), s())),
+            body: Box::new(alias2),
+            mutable: false,
+            let_in: false,
+            span: s(),
+        };
+        let lambda = Expr::Lambda {
+            params: vec![Param::new("cb", Some(callback_type))],
+            ret_type: None,
+            body: Box::new(alias1),
+            effect: Some(EffectRow::empty()),
+            span: s(),
+        };
+        let mut checker = EffectChecker::new();
+        assert!(
+            checker.infer_effects(&EffectContext::empty(), &lambda).is_err(),
+            "transitive local aliases must keep the callback's effect"
+        );
+    }
+
+    #[test]
+    fn test_actor_behavior_callback_parameter_respects_effect_contract() {
+        let mut ast = parse_module(
+            "actor Counter { state count = 0 behavior get() { self.count } }",
+        );
+        let Decl::Actor { behaviors, .. } = &mut ast.decls[0] else {
+            panic!("expected actor declaration");
+        };
+        let callback_type = Type::Function {
+            param: Box::new(Type::Tuple(vec![])),
+            ret: Box::new(Type::unit()),
+            effect: EffectRow::singleton(Effect::IO),
+            cap: Capability::Ref,
+        };
+        behaviors[0].params = vec![Param::new("cb", Some(callback_type))];
+        behaviors[0].body = Expr::App {
+            func: Box::new(Expr::Var("cb".to_string(), s())),
+            args: vec![],
+            span: s(),
+        };
+        behaviors[0].effect = Some(EffectRow::empty());
+        let mut checker = EffectChecker::new();
+        assert!(
+            checker.check_decl(&ast.decls[0]).is_err(),
+            "pure actor behavior cannot invoke an IO callback"
+        );
+
+        let Decl::Actor { behaviors, .. } = &mut ast.decls[0] else {
+            unreachable!();
+        };
+        behaviors[0].effect = Some(EffectRow::singleton(Effect::IO));
+        let mut checker = EffectChecker::new();
+        assert!(
+            checker.check_decl(&ast.decls[0]).is_ok(),
+            "actor behavior can invoke an IO callback when the contract permits it"
         );
     }
 

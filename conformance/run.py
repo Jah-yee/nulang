@@ -14,8 +14,12 @@ nulang_bin = os.path.join(target_dir, "debug", "nulang")
 passed = 0
 failed = 0
 
+# Optional basename prefixes select a focused conformance subset; no args
+# retain the full-suite behavior used by existing manual invocations.
+prefixes = tuple(sys.argv[1:])
 for file in os.listdir("conformance/behavior"):
     if not file.endswith(".nula"): continue
+    if prefixes and not file.startswith(prefixes): continue
     base = file[:-5]
     json_path = f"conformance/behavior/{base}.json"
     nula_path = f"conformance/behavior/{file}"
