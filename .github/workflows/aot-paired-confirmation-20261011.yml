@@ -1,0 +1,93 @@
+# One-off, branch-scoped investigation for Nulang's 2026-10-11 AOT latency alert.
+# This workflow is intentionally NOT merged to main. It writes no repository state.
+name: AOT paired confirmation (diagnostic)
+
+on:
+  push:
+    branches:
+      - bench/aot-paired-confirmation-20261011
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aot-paired-confirmation-20261011
+  cancel-in-progress: false
+
+jobs:
+  confirm:
+    name: Exact-parent AOT A/B (8 pairs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 85
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y python3-dev pkg-config
+      - name: Use canonical Rust benchmark toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.95.0'
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Validate paired benchmark harness unit tests
+        run: python3 -m unittest scripts/tests/test_confirm_bench_regression.py
+      - name: Create exact alert manifest and print commit identity
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          Path("benchmarks/aot-confirmation-manifest.json").write_text(
+              json.dumps(
+                  {
+                      "schema": 1,
+                      "regressions": [
+                          {"benchmark": "aot_hot_loop", "threshold": 0.20},
+                          {"benchmark": "aot_int_loop", "threshold": 0.20},
+                      ],
+                  },
+                  indent=2,
+              ) + "\n"
+          )
+          PY
+          git rev-parse HEAD
+          git rev-parse f21d0d1dc4990ee762873e7c8ae560d07e03f771
+          git diff --name-only 8b0f4369f47013ca4060b4c652402b6ea1887734 HEAD
+      - name: Measure exact parent and candidate on same pinned CPU
+        run: |
+          set +e
+          python3 scripts/confirm_bench_regression.py \
+            --base-ref f21d0d1dc4990ee762873e7c8ae560d07e03f771 \
+            --manifest benchmarks/aot-confirmation-manifest.json \
+            --runs 8 \
+            --cpu-mode single \
+            --output benchmarks/aot-paired-20261011.json
+          result=$?
+          set -e
+          printf '%s\n' "$result" > benchmarks/aot-paired-exit-code.txt
+          echo "AOT paired result exit code: $result (0 clear, 1 confirmed, 2 operational)"
+      - name: Upload exact paired measurements and exit code
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: aot-paired-20261011
+          path: |
+            benchmarks/aot-paired-20261011.json
+            benchmarks/aot-paired-exit-code.txt
+            benchmarks/aot-confirmation-manifest.json
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Report regression confirmation outcome
+        run: |
+          status="$(cat benchmarks/aot-paired-exit-code.txt)"
+          if [ "$status" -eq 0 ]; then
+            echo "No regression confirmed above the 20% threshold"
+            exit 0
+          fi
+          if [ "$status" -eq 1 ]; then
+            echo "::error::AOT latency regression confirmed by paired testing"
+            exit 1
+          fi
+          echo "::error::AOT paired benchmark validation failed operationally (exit $status)"
+          exit 2
