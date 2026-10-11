@@ -491,8 +491,10 @@ mod tests {
                 }
 
                 for round in 0..80 {
-                    first.tick_round();
-                    replay.tick_round();
+                    // Virtual time must advance to exercise suspicion,
+                    // failure detection, quorum fencing and probe recovery.
+                    first.step();
+                    replay.step();
                     assert_eq!(
                         first.last_round_heartbeats,
                         replay.last_round_heartbeats,
