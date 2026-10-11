@@ -49,10 +49,11 @@ native-codegen = [
     "dep:cranelift-native",
     "dep:cranelift-frontend",
     "dep:cranelift-codegen",
-    "dep:cranelift-object",
-    "dep:tempfile",
     "dep:target-lexicon",
 ]
+# Standalone Linux object+linker emission is deliberately opt-in. JIT-only
+# embedders do not depend on object emission or temporary-file management.
+native-executable = ["native-codegen", "dep:cranelift-object", "dep:tempfile"]
 # Marker profile for embedded mobile runtimes. Intentionally empty: the
 # bytecode interpreter and pre-registered host callbacks need no JIT.
 mobile-runtime = []
