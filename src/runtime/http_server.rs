@@ -1248,7 +1248,7 @@ mod tests {
             },
             params: HashMap::new(),
         };
-        let legacy = "<html><head><meta http-equiv=\\"refresh\\" content=\\"0;url=/receipt\\"></head></html>".to_string();
+        let legacy = r#"<html><head><meta http-equiv="refresh" content="0;url=/receipt"></head></html>"#.to_string();
 
         assert_eq!(take_web_redirect(&legacy), None);
         with_request_context(request.clone(), || {
