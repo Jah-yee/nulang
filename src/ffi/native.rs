@@ -219,14 +219,18 @@ impl FfiRegistry {
         }
         if let Some(func) = self.resolve(None, symbol) {
             if func.signature != signature {
-                return Err(format!("FFI signature mismatch for registered callback {symbol}"));
+                return Err(format!(
+                    "FFI signature mismatch for registered callback {symbol}"
+                ));
             }
             return Ok(func);
         }
         // The sentinel is reserved for host-registered callbacks; resolving a
         // missing entry must never fall through to dlopen of an arbitrary path.
         if library == "__nulang_registered__" {
-            return Err(format!("FFI callback {symbol} not registered in this runtime"));
+            return Err(format!(
+                "FFI callback {symbol} not registered in this runtime"
+            ));
         }
         let lib = self.load_library(library)?;
         let symbol_name = symbol.to_string();
