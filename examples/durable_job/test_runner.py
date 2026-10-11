@@ -5,6 +5,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
+
+import run_demo
 
 HERE = Path(__file__).resolve().parent
 
@@ -16,6 +19,17 @@ class CrashHarnessTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("PASS sqlite:", result.stdout)
         self.assertIn("RECOVERED=2:1, COMPLETED=2:1", result.stdout)
+
+    def test_nulang_cli_arguments_grant_only_fs_as_separate_tokens(self):
+        # Regression: --with=fs is rejected; the CLI accepts --with fs.
+        with mock.patch.object(run_demo, "run_phase") as phase:
+            run_demo.exercise("nulang", ["/some/nulang"], 5)
+        self.assertEqual(phase.call_count, 3)
+        for call in phase.call_args_list:
+            argv = call.args[0]
+            self.assertEqual(argv[:5], ["/some/nulang", "--backend", "bytecode", "--with", "fs"])
+            self.assertNotIn("--with=fs", argv)
+            self.assertIn("--store", argv)
 
     def test_runner_rejects_fake_nulang_that_loses_committed_state(self):
         with tempfile.TemporaryDirectory() as temp:
