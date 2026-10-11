@@ -561,6 +561,20 @@ impl Actor {
         self.held_object_store = None;
     }
 
+    /// Reinitialize a pooled actor with its default synthetic name while
+    /// retaining the previous String allocation when its capacity suffices.
+    ///
+    /// Used only for the runtime's default `actor_<id>` naming path. Explicit
+    /// caller-supplied names continue through `reset` unchanged.
+    pub(crate) fn reset_with_generated_name(&mut self, id: u64, mailbox_cap: usize) {
+        use std::fmt::Write as _;
+
+        let mut name = std::mem::take(&mut self.name);
+        name.clear();
+        write!(&mut name, "actor_{id}").expect("formatting into String cannot fail");
+        self.reset(id, name, mailbox_cap);
+    }
+
     /// Hibernate this actor: serialize its state and VM continuation,
     /// store in hibernation_state, and return the serialized bytes.
     pub fn hibernate(
