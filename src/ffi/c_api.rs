@@ -212,25 +212,27 @@ impl NulangRuntime {
         string_id: usize,
         module_index: Option<usize>,
     ) -> Result<String, String> {
-        let lookup = |module: &crate::bytecode::CodeModule| {
+        fn lookup(module: &crate::bytecode::CodeModule, string_id: usize) -> Option<&str> {
             module.constants.get(string_id).and_then(|constant| match constant {
                 crate::bytecode::Constant::String(text) => Some(text.as_str()),
                 _ => None,
             })
-        };
+        }
 
         if let Some(module_index) = module_index {
             return self
                 .modules
                 .get(module_index)
-                .and_then(lookup)
+                .and_then(|module| lookup(module, string_id))
                 .map(str::to_owned)
-                .ok_or_else(|| format!("string id {string_id} is not present in the selected module"));
+                .ok_or_else(|| {
+                    format!("string id {string_id} is not present in the selected module")
+                });
         }
 
         let mut resolved: Option<&str> = None;
         for module in &self.modules {
-            let current = lookup(module).ok_or_else(|| {
+            let current = lookup(module, string_id).ok_or_else(|| {
                 "ambiguous string value across modules; use nulang_value_to_string_in_module"
                     .to_string()
             })?;
@@ -261,8 +263,9 @@ impl NulangRuntime {
         } else {
             value.to_string_repr()
         };
-        let cstr = CString::new(text)
-            .map_err(|_| "Nulang string cannot be represented as a C string (interior NUL)".to_string())?;
+        let cstr = CString::new(text).map_err(|_| {
+            "Nulang string cannot be represented as a C string (interior NUL)".to_string()
+        })?;
         let ptr = cstr.as_ptr();
         self.string_cache.push(cstr);
         Ok(ptr)
