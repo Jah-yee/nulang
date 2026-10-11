@@ -1340,7 +1340,9 @@ pub(crate) mod tests {
             ),
             req(4, "configurationDone", json!({})),
         ];
-        let msgs = run_session(source, &script);
+        // A scripted test client must remain connected while the debuggee
+        // finishes; a finite Cursor EOF models a real client disconnect.
+        let msgs = run_session_until_terminated(source, &script);
 
         // No breakpoints set -> the program runs to completion.
         assert!(
