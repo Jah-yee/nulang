@@ -118,12 +118,18 @@ mod tests {
         let mut mir = crate::mir_lower::lower_module(&hir)?;
 
         match backend() {
+            #[cfg(feature = "native-codegen")]
             "native" => {
                 let aot_module = crate::aot::AotModule::compile(&mir)?;
                 let result_raw = aot_module.run()?;
-                let value = Value::from_raw(result_raw);
+                let value = unsafe { Value::from_raw(result_raw) };
                 Ok((value, module_type))
             }
+            #[cfg(not(feature = "native-codegen"))]
+            "native" => Err(NuError::VMError {
+                msg: "native test backend not compiled in (enable 'native-codegen')".into(),
+                span: crate::types::Span::default(),
+            }),
             _ => {
                 let module = crate::mir_codegen::compile_mir(&mut mir, "test")?;
                 // 5. Run
@@ -1983,6 +1989,7 @@ match { a: 2, b: 9 } with {
     /// (guard-stripped) compiler and produce exactly the same result the
     /// interpreter computes. The arithmetic-heavy body gives the tiering
     /// path a straight-line region longer than the 5-instruction minimum.
+    #[cfg(feature = "native-codegen")]
     #[test]
     fn test_jit_typed_guard_stripping_hot_function() {
         let source = r#"
@@ -2126,6 +2133,7 @@ match { a: 2, b: 9 } with {
     /// that would produce inf/NaN). The hot run tiers the function up
     /// through the type-directed JIT path (>1000 reductions), so both
     /// runs agreeing proves interpreter == JIT.
+    #[cfg(feature = "native-codegen")]
     #[test]
     fn test_float_div_by_zero_cold_and_hot_parity() {
         let source = |n: i64| {
@@ -2185,6 +2193,7 @@ match { a: 2, b: 9 } with {
     /// fuzzer cannot reach (its corpus contains no effect programs), so this
     /// test pins interp==JIT for an effect performed once per loop iteration
     /// for 2000 iterations.
+    #[cfg(feature = "native-codegen")]
     #[test]
     fn test_effect_in_hot_loop_jit_matches_interpreter() {
         let source = |n: i64| {
@@ -2259,6 +2268,7 @@ match { a: 2, b: 9 } with {
     /// (interpreted, since `PerformDirect` yields) back into the JIT-compiled
     /// loop body's `acc += v * 2`, pinning the register-round-trip at the
     /// yield point. Expected: Σ 2(i+1) for i in 0..n == n(n+1).
+    #[cfg(feature = "native-codegen")]
     #[test]
     fn test_effect_resume_value_flows_into_jit_loop_arithmetic() {
         let source = |n: i64| {
@@ -2322,6 +2332,7 @@ match { a: 2, b: 9 } with {
     /// form (which is correct but fragments the JIT region), the straight-line
     /// loop body compiles as one region, so `jit_compiled_count() >= 1`.
     /// Expected for last i = n-1: acc = (i+10)*3.
+    #[cfg(feature = "native-codegen")]
     #[test]
     fn test_multi_effect_dispatch_in_hot_loop_jit() {
         let source = |n: i64| {
@@ -2382,6 +2393,7 @@ match { a: 2, b: 9 } with {
     /// Hot float arithmetic with a nonzero divisor: the typed JIT path
     /// must produce bit-identical results to the interpreter. The
     /// recurrence acc' = (2*acc + 1)/4 converges to exactly 0.5.
+    #[cfg(feature = "native-codegen")]
     #[test]
     fn test_float_arithmetic_hot_typed_jit_exact() {
         let source = r#"
@@ -3450,12 +3462,9 @@ match { a: 2, b: 9 } with {
     }
 
     /// `crdt` fields survive crash+recovery as *materialized* `state_data`
-    /// (snapshotted by `checkpoint_actor`'s Durable|Crdt filter). The
-    /// `Crdt.*` effect module is the live-actor mutation path, but
-    /// `recover_actor` does not rebuild `CrdtManager.field_map`, so
-    /// `perform Crdt.*` is a silent nil no-op on a recovered actor — this
-    /// test pins that actual behavior: `state_data["count"]` survives, but a
-    /// post-recovery `inc` does not bump it.
+    /// (snapshotted by `checkpoint_actor`'s Durable|Crdt filter). After
+    /// recovery `CrdtManager.field_map` is rebuilt from the snapshot, so
+    /// `perform Crdt.*` keeps working and mutates the restored replica.
     #[test]
     fn test_crdt_field_survives_recovery() {
         let source = r#"
@@ -3546,10 +3555,9 @@ match { a: 2, b: 9 } with {
             "crdt field's materialized value survives recovery via the snapshot path"
         );
 
-        // Pin the recovery gap: `recover_actor` restores the materialized
-        // value and the CrdtManager entries but not `field_map`, so a
-        // post-recovery `Crdt.increment` is a silent no-op (get_field_id
-        // returns None) and `state_data["count"]` stays at 2.
+        // After recovery the CRDT field map is rebuilt, so a post-recovery
+        // `Crdt.increment` mutates the restored replica and materializes the
+        // new value back into `state_data`.
         rt2.borrow_mut().send_message(actor_id, "inc", &[]);
         rt2.borrow_mut().run_scheduler();
         assert_eq!(
@@ -3559,12 +3567,12 @@ match { a: 2, b: 9 } with {
                 .unwrap()
                 .get_state_field("count")
                 .and_then(|v| v.as_int()),
-            Some(2),
-            "post-recovery Crdt.increment must be a no-op: field_map is not rebuilt"
+            Some(3),
+            "post-recovery Crdt.increment must mutate the restored CRDT replica"
         );
 
-        // The statement AFTER the no-op `perform` must still run — if the
-        // behavior aborted with an unhandled effect, `ticks` would stay 0.
+        // The statement after the `perform` must still run — if the behavior
+        // aborted with an unhandled effect, `ticks` would stay 0.
         assert_eq!(
             rt2.borrow()
                 .actors
@@ -3573,7 +3581,7 @@ match { a: 2, b: 9 } with {
                 .get_state_field("ticks")
                 .and_then(|v| v.as_int()),
             Some(1),
-            "post-recovery Crdt.increment returns nil and the behavior continues"
+            "post-recovery Crdt.increment returns unit and the behavior continues"
         );
     }
 
@@ -3638,6 +3646,47 @@ match { a: 2, b: 9 } with {
             ticks,
             Some(2),
             "the statement after the rejected perform/assignment must still run (no abort)"
+        );
+    }
+
+    /// A `state crdt gcounter` actor field accepts `Crdt.increment` and the
+    /// merged value materializes into `state_data` after the scheduler runs.
+    #[test]
+    fn test_crdt_gcounter_materializes_end_to_end() {
+        let source = r#"
+            actor Counter {
+                state crdt gcounter count: Int = 0
+                behavior inc() { perform Crdt.increment("count") }
+                behavior get() { self.count }
+            }
+            spawn Counter {}
+        "#;
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let (module, _ty) = compile_source(source).unwrap();
+        let actor_id = {
+            let mut vm = VM::new();
+            vm.load_module(module);
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+            vm.run().unwrap().as_actor_id().unwrap()
+        };
+
+        rt.borrow_mut().send_message(actor_id, "inc", &[]);
+        rt.borrow_mut().send_message(actor_id, "inc", &[]);
+        rt.borrow_mut().send_message(actor_id, "inc", &[]);
+        rt.borrow_mut().run_scheduler();
+
+        let count = rt
+            .borrow()
+            .actors
+            .get(&actor_id)
+            .unwrap()
+            .get_state_field("count")
+            .and_then(|v| v.as_int());
+        assert_eq!(
+            count,
+            Some(3),
+            "gcounter must materialize count=3 after three increments"
         );
     }
 
@@ -4001,7 +4050,9 @@ match { a: 2, b: 9 } with {
         );
 
         // Send the signal. The runtime appends SignalReceived and resumes the step.
-        rt2.borrow_mut().signal_workflow(actor_id, "go", None);
+        rt2.borrow_mut()
+            .signal_workflow(actor_id, "go", None)
+            .unwrap();
 
         assert_eq!(
             rt2.borrow()
@@ -4073,7 +4124,9 @@ match { a: 2, b: 9 } with {
 
         // First signal arrives: the step resumes, then suspends again on the
         // second signal. The chained suspension must be re-captured.
-        rt.borrow_mut().signal_workflow(actor_id, "first", None);
+        rt.borrow_mut()
+            .signal_workflow(actor_id, "first", None)
+            .unwrap();
         {
             let rt = rt.borrow();
             let actor = rt.actors.get(&actor_id).unwrap();
@@ -4094,7 +4147,9 @@ match { a: 2, b: 9 } with {
         }
 
         // Second signal arrives: the step completes and the workflow advances.
-        rt.borrow_mut().signal_workflow(actor_id, "second", None);
+        rt.borrow_mut()
+            .signal_workflow(actor_id, "second", None)
+            .unwrap();
         {
             let rt = rt.borrow();
             let actor = rt.actors.get(&actor_id).unwrap();
@@ -4491,6 +4546,9 @@ match { a: 2, b: 9 } with {
         let rt = Rc::new(RefCell::new(Runtime::new()));
         rt.borrow_mut().persistence = Box::new(store.clone());
         rt.borrow_mut().install_virtual_clock();
+        // Deliberately let wall time move past the sleep duration. Timer
+        // scheduling must remain relative to the frozen virtual clock.
+        std::thread::sleep(std::time::Duration::from_millis(75));
 
         let value = {
             let mut vm = VM::new();
@@ -4708,7 +4766,9 @@ match { a: 2, b: 9 } with {
         );
 
         // Deliver the signal so branch b can finish.
-        rt2.borrow_mut().signal_workflow(actor_id, "continue", None);
+        rt2.borrow_mut()
+            .signal_workflow(actor_id, "continue", None)
+            .unwrap();
         rt2.borrow_mut().run_scheduler();
 
         assert_eq!(
@@ -5517,10 +5577,17 @@ match { a: 2, b: 9 } with {
         let child_id = value.as_actor_id().expect("spawn returns an actor id");
 
         let rt_ref = rt.borrow();
+        assert!(
+            rt_ref.respawn_opted.contains(&child_id),
+            "policy 3 must opt the persistent child into RespawnOnNodeLoss"
+        );
+        let child = rt_ref
+            .actors
+            .get(&child_id)
+            .expect("the opted-in persistent child must remain live");
         assert_eq!(
-            rt_ref.respawn_opted.get(&child_id),
-            Some(&1),
-            "policy 3 must opt the persistent child into RespawnOnNodeLoss (epoch 1)"
+            child.activation_epoch, 1,
+            "initial RespawnOnNodeLoss opt-in must preserve the actor's canonical epoch"
         );
     }
 
@@ -7835,9 +7902,12 @@ match { a: 2, b: 9 } with {
         // response sits untouched in the channel no matter how long the
         // worker takes.
         loop {
-            let next = rt.borrow_mut().scheduler.dequeue();
+            let next = rt.borrow_mut().claim_next_ready_actor();
             match next {
-                Some(actor_id) => rt.borrow_mut().step_actor(actor_id),
+                Some(actor_id) => {
+                    rt.borrow_mut().step_actor(actor_id);
+                    rt.borrow_mut().finish_actor_turn(actor_id);
+                }
                 None => break,
             }
         }
@@ -8252,7 +8322,9 @@ match { a: 2, b: 9 } with {
         // The signal arrives: the step resumes, consumes it, and suspends
         // again on the background LLM call.  The suspension must be
         // re-captured with the Inference.ask marker — NOT treated as a step failure.
-        rt.borrow_mut().signal_workflow(actor_id, "go", None);
+        rt.borrow_mut()
+            .signal_workflow(actor_id, "go", None)
+            .unwrap();
         {
             let rt_ref = rt.borrow();
             let actor = rt_ref.actors.get(&actor_id).unwrap();
@@ -8376,7 +8448,9 @@ match { a: 2, b: 9 } with {
         assert_eq!(client.recorded_calls().len(), 1, "exactly one LLM call");
 
         // The signal arrives: the step runs to completion.
-        rt.borrow_mut().signal_workflow(actor_id, "go", None);
+        rt.borrow_mut()
+            .signal_workflow(actor_id, "go", None)
+            .unwrap();
         {
             let rt_ref = rt.borrow();
             let actor = rt_ref.actors.get(&actor_id).unwrap();

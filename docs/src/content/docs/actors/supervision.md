@@ -27,7 +27,16 @@ The second argument is the strategy:
 Place an existing actor under supervision:
 
 ```nulang
-perform Otp.supervise_child(sup_id, worker_actor, 0)
+actor Worker {
+    behavior work() { unit }
+}
+
+fn main() {
+    let sup_id = perform Otp.create_supervisor("my_sup", 0)
+    let worker_actor = spawn Worker {}
+    perform Otp.supervise_child(sup_id, worker_actor, 0)
+    0
+}
 ```
 
 Child restart policies:
@@ -37,6 +46,7 @@ Child restart policies:
 | `0` | `permanent` | Always restarted on exit |
 | `1` | `temporary` | Never restarted |
 | `2` | `transient` | Restarted only on abnormal exit |
+| `3` | `respawn_on_node_loss` | Re-spawn the child on another node when its home node is confirmed gone (RFC 0014). Implies `permanent` semantics for the local exit protocol, plus shadow replication and directory registration. Only meaningful for durable children. |
 
 ## Simple One-for-One Templates
 
@@ -58,17 +68,26 @@ let child2 = perform Otp.start_child(sup)
 Actors can be linked or monitored without full supervision:
 
 ```nulang
-// Link: abnormal exits propagate to the linked peer
-perform Actor.link(target)
+actor Watcher {
+    behavior manage(target) {
+        // Linking and monitoring are invoked from the owning actor.
+        perform Actor.link(target)
+        perform Actor.unlink(target)
+        perform Actor.monitor(target)
+        perform Actor.demonitor(target)
+    }
+}
 
-// Unlink: remove the link
-perform Actor.unlink(target)
+actor Worker {
+    behavior work() { unit }
+}
 
-// Monitor: receive a DOWN message when target exits
-perform Actor.monitor(target)
-
-// Demonitor: stop monitoring
-perform Actor.demonitor(target)
+fn main() {
+    let watcher = spawn Watcher {}
+    let target = spawn Worker {}
+    watcher ! manage(target)
+    0
+}
 ```
 
 ## Exit Trapping
@@ -114,7 +133,7 @@ actor PoolWorker {
 
     behavior process(task: String) {
         // Simulate work — may fail
-        if task == "crash" {
+        if task == "crash" then {
             perform Actor.exit(1)
         }
         perform IO.print("Worker " + perform Int.to_string(self.id) + " processed: " + task)

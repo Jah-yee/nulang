@@ -579,7 +579,9 @@ pub struct ActorMeta {
     /// Entity schema version (RFC 0008).  Defaults to 1.
     #[serde(default = "default_version")]
     pub version: u32,
-    /// Serialized migration contracts (JSON `Vec<MigrationDecl>`).  RFC 0008.
+    /// Canonical migration compatibility metadata (JSON version topology and
+    /// event-handler surface). Executable migration bodies remain compiler IR
+    /// until runtime migration lowering is implemented. RFC 0008.
     #[serde(default)]
     pub migrations: String,
 }
@@ -625,6 +627,8 @@ pub enum FfiType {
     String,
     Unit,
     Pointer,
+    /// Opaque Nulang value (C API only; not expressible in `extern` blocks).
+    Value,
 }
 
 /// A foreign function declared in an `extern "lib" { ... }` block.
@@ -665,6 +669,18 @@ pub struct ExportTableEntry {
     pub type_sig: String,
 }
 
+/// Compiler-owned semantic identity attached to one bytecode effect opcode.
+///
+/// `id` is the raw `EffectSiteId` digest produced from backend-independent
+/// MIR. The bytecode PC is artifact-local lookup metadata only and does not
+/// participate in identity derivation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectSiteMetadata {
+    pub pc: usize,
+    pub id: [u8; 32],
+    pub effect_operation: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CodeModule {
     pub name: String,
@@ -695,6 +711,13 @@ pub struct CodeModule {
     /// Populated by MIR codegen; consumed by the VM's `step_spawn`.
     #[serde(default)]
     pub spawn_init_overrides: Vec<(usize, Vec<(String, Constant)>)>,
+    /// Spawn-time capability grants.  Maps `Spawn` instruction byte-offset to
+    /// the capability token strings (e.g. `Net::TcpOut(host:port)`) granted to
+    /// the actor spawned by that instruction.  Populated by MIR codegen from
+    /// `spawn Foo() with [...]`; consumed by the VM's `step_spawn`, which
+    /// installs the set on the new actor for runtime enforcement.
+    #[serde(default)]
+    pub spawn_capability_grants: Vec<(usize, Vec<String>)>,
     #[serde(default)]
     pub remote_spawn_init_fields: Vec<(usize, Vec<String>)>,
     /// Sorted (bytecode pc -> 1-indexed source line) for the DAP server's
@@ -708,6 +731,13 @@ pub struct CodeModule {
     pub debug_functions: Vec<DebugFunctionInfo>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub export_table: Vec<ExportTableEntry>,
+    /// Exact bytecode effect-opcode PC -> compiler-owned semantic site ID.
+    ///
+    /// This is additive NBC JSON metadata. Old artifacts omit it and load with
+    /// an empty vector; opcode bytes and the frozen NBC format version do not
+    /// change.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effect_sites: Vec<EffectSiteMetadata>,
 }
 
 impl CodeModule {
@@ -722,6 +752,7 @@ impl CodeModule {
             exports: Vec::new(),
             entry_point: None,
             spawn_init_overrides: Vec::new(),
+            spawn_capability_grants: Vec::new(),
             remote_spawn_init_fields: Vec::new(),
             handler_tables: Vec::new(),
             actor_metadata: Vec::new(),
@@ -730,6 +761,7 @@ impl CodeModule {
             line_table: Vec::new(),
             debug_functions: Vec::new(),
             export_table: Vec::new(),
+            effect_sites: Vec::new(),
         }
     }
 
@@ -776,10 +808,38 @@ impl CodeModule {
             .map(|&(pc, l)| (pc, l))
     }
 
+    /// Semantic effect-site metadata for exactly this bytecode PC.
+    pub fn effect_site_at(&self, pc: usize) -> Option<&EffectSiteMetadata> {
+        self.effect_sites
+            .binary_search_by_key(&pc, |site| site.pc)
+            .ok()
+            .map(|index| &self.effect_sites[index])
+    }
+
     pub fn add_constant(&mut self, c: Constant) -> usize {
         let idx = self.constants.len();
         self.constants.push(c);
         idx
+    }
+
+    /// Append a string constant and return its pool index so that embedders
+    /// can manufacture `Value::string` values for a compiled module.
+    pub fn add_string_constant(&mut self, s: impl Into<String>) -> usize {
+        self.add_constant(Constant::String(s.into()))
+    }
+
+    /// Find the bytecode offset of a top-level function by name using the
+    /// debug-function table. Returns `None` if the name is not found or belongs
+    /// to an actor behavior (behaviors are not in `function_table`).
+    pub fn function_offset_by_name(&self, name: &str) -> Option<usize> {
+        let info = self.debug_functions.iter().find(|d| d.name == name)?;
+        // `debug_functions` and `function_table` are populated in the same order
+        // for ordinary functions, but behaviors also appear in `debug_functions`
+        // after the function table ends. Verify the offset matches an entry.
+        self.function_table
+            .iter()
+            .any(|&off| off == info.code_offset)
+            .then_some(info.code_offset)
     }
 
     pub fn add_behavior(&mut self, b: BehaviorTableEntry) -> usize {

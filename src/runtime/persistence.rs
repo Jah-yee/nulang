@@ -4,11 +4,13 @@
 //! snapshot of durable actor state and an append-only journal of messages.
 //! On recovery the runtime loads the latest snapshot and replays the journal.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use crate::durable_effect::DurableEffectId;
+use crate::durable_effect_persistence::DurableEffectPersistenceRecord;
 use crate::vm::Value;
 
 use tracing::warn;
@@ -124,12 +126,27 @@ impl PersistedValue {
     }
 }
 
+/// Initial fencing epoch for a newly activated durable actor.
+///
+/// Epoch zero is reserved as invalid by the atomic persistence contract.
+pub const INITIAL_ACTIVATION_EPOCH: u64 = 1;
+
+fn initial_activation_epoch() -> u64 {
+    INITIAL_ACTIVATION_EPOCH
+}
+
 /// A serializable snapshot of an actor's durable state.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct ActorSnapshot {
     pub actor_id: u64,
     pub sequence: u64,
+    /// Monotonic fencing epoch for this logical actor activation.
+    ///
+    /// Legacy snapshots predate epoch fencing and therefore deserialize as
+    /// the initial epoch rather than zero.
+    #[serde(default = "initial_activation_epoch")]
+    pub activation_epoch: u64,
     pub state: HashMap<String, PersistedValue>,
     /// For workflow actors, the name of the signal the current step is
     /// suspended waiting for, if any.  This is part of the snapshot so that
@@ -139,6 +156,38 @@ pub struct ActorSnapshot {
     /// `Vec<(crdt_id, crdt_type_u8, payload_bytes)>`.
     #[serde(default)]
     pub crdt_snapshot: Option<Vec<(u64, u8, Vec<u8>)>>,
+    /// Maps CRDT field names (on this actor) to the `CrdtId` stored in
+    /// `crdt_snapshot`. Needed so `recover_actor` can rebuild `CrdtManager.field_map`
+    /// and `perform Crdt.*` keeps working after a restart.
+    #[serde(default)]
+    pub crdt_field_map: Option<HashMap<String, u64>>,
+    /// Canonical declared actor schema represented by this snapshot. Legacy
+    /// snapshots omit it and are accepted only when the loaded module has one
+    /// unambiguous actor schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_name: Option<String>,
+    /// Canonical external-authority tokens held by the actor at the time
+    /// of the snapshot. Missing on pre-authority snapshots means empty
+    /// authority (deny by default). Values are reparsed as a complete
+    /// typed manifest before any recovered actor becomes observable.
+    #[serde(default)]
+    pub authority_tokens: BTreeSet<String>,
+}
+
+impl Default for ActorSnapshot {
+    fn default() -> Self {
+        Self {
+            actor_id: 0,
+            sequence: 0,
+            activation_epoch: INITIAL_ACTIVATION_EPOCH,
+            state: HashMap::new(),
+            waiting_signal: None,
+            crdt_snapshot: None,
+            crdt_field_map: None,
+            schema_name: None,
+            authority_tokens: BTreeSet::new(),
+        }
+    }
 }
 
 /// A journal entry records a message delivered to an actor.
@@ -172,6 +221,46 @@ fn default_event_value() -> PersistedValue {
     PersistedValue::Int(1)
 }
 
+/// Stable identity of one accepted workflow command activation.
+///
+/// The command journal sequence is allocated before user code executes and
+/// remains stable across suspension, replay, and terminal workflow events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct WorkflowActivationId {
+    pub actor_id: u64,
+    pub command_sequence: u64,
+}
+
+impl WorkflowActivationId {
+    pub const fn new(actor_id: u64, command_sequence: u64) -> Self {
+        Self {
+            actor_id,
+            command_sequence,
+        }
+    }
+}
+
+/// Stable replay identity for one deterministic intermediate workflow event.
+///
+/// The ordinal is local to the accepted command activation. Re-executing the
+/// same activation from its safe boundary must derive the same ordinal for the
+/// same logical event, allowing recovery to consume committed history instead
+/// of appending the event again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct WorkflowReplayEventId {
+    pub activation: WorkflowActivationId,
+    pub ordinal: u32,
+}
+
+impl WorkflowReplayEventId {
+    pub const fn new(activation: WorkflowActivationId, ordinal: u32) -> Self {
+        Self {
+            activation,
+            ordinal,
+        }
+    }
+}
+
 /// A workflow event records a durable, replayable step in a workflow actor.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "tag", content = "value")]
@@ -183,10 +272,23 @@ pub enum WorkflowEvent {
         state: Vec<PersistedValue>,
     },
     /// A workflow step completed successfully.
-    StepCompleted { sequence: u64, step_name: String },
+    StepCompleted {
+        sequence: u64,
+        /// Stable identity of the accepted command this terminal event closes.
+        /// Missing on legacy journal records written before activation identity
+        /// was persisted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        activation: Option<WorkflowActivationId>,
+        step_name: String,
+    },
     /// A timer was set for a workflow.
     TimerSet {
         sequence: u64,
+        /// Replay-stable identity for deterministic timer preparation.
+        ///
+        /// Legacy records omit this field and remain readable.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replay_id: Option<WorkflowReplayEventId>,
         name: String,
         duration_ms: u64,
     },
@@ -212,12 +314,22 @@ pub enum WorkflowEvent {
     /// silent — exit 0, no diagnostic).
     StepFailed {
         sequence: u64,
+        /// Stable identity of the accepted command this terminal event closes.
+        /// Missing on legacy journal records written before activation identity
+        /// was persisted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        activation: Option<WorkflowActivationId>,
         step_name: String,
         error: String,
     },
     /// Any other event emitted by a workflow handler.
     Custom {
         sequence: u64,
+        /// Replay-stable identity for deterministic intermediate events.
+        ///
+        /// Legacy records omit this field and remain readable.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replay_id: Option<WorkflowReplayEventId>,
         name: String,
         args: Vec<PersistedValue>,
     },
@@ -238,10 +350,329 @@ impl WorkflowEvent {
             | WorkflowEvent::Custom { sequence, .. } => *sequence,
         }
     }
+
+    /// Return the accepted command activation closed by a terminal event.
+    ///
+    /// Legacy events return `None` and remain readable for compatibility.
+    pub fn activation_id(&self) -> Option<WorkflowActivationId> {
+        match self {
+            WorkflowEvent::StepCompleted { activation, .. }
+            | WorkflowEvent::StepFailed { activation, .. } => *activation,
+            _ => None,
+        }
+    }
+
+    /// Return the deterministic replay identity of an intermediate event.
+    ///
+    /// Custom events and timer preparation share this activation-local
+    /// identity today. Other replay-sensitive workflow records will adopt the
+    /// same ordinal model in later #836 slices.
+    pub fn replay_id(&self) -> Option<WorkflowReplayEventId> {
+        match self {
+            WorkflowEvent::TimerSet { replay_id, .. } | WorkflowEvent::Custom { replay_id, .. } => {
+                *replay_id
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Version of the atomic durable-transition persistence contract.
+pub const DURABLE_TRANSITION_VERSION: u16 = 1;
+
+/// One outbound actor message staged inside a durable transition.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DurableOutboxMessage {
+    pub destination_actor_id: u64,
+    pub ordinal: u32,
+    pub behavior_id: u16,
+    pub payload: Vec<PersistedValue>,
+}
+
+/// One logical durable actor/workflow/entity transition.
+#[derive(Debug, Clone)]
+pub struct DurableTransition {
+    pub version: u16,
+    pub actor_id: u64,
+    pub activation_epoch: u64,
+    pub sequence: u64,
+    pub expected_previous_sequence: u64,
+    pub command: Option<JournalEntry>,
+    pub snapshot: Option<ActorSnapshot>,
+    pub workflow_events: Vec<WorkflowEvent>,
+    pub domain_events: Vec<EventEntry>,
+    pub durable_effects: Vec<DurableEffectPersistenceRecord>,
+    pub outbox: Vec<DurableOutboxMessage>,
+}
+
+/// Durable tail used for epoch/sequence fencing and idempotent commit retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DurableTail {
+    pub activation_epoch: u64,
+    pub sequence: u64,
+    pub digest: [u8; 32],
+}
+
+/// Minimal committed-tail metadata needed to classify crash recovery.
+///
+/// Recovery intentionally does not need the transition digest; it only needs
+/// the fencing epoch and exact committed sequence to distinguish atomic
+/// command admission from legacy journal history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DurableTailPosition {
+    pub activation_epoch: u64,
+    pub sequence: u64,
+}
+
+/// Result of a successfully committed durable transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DurableCommit {
+    pub actor_id: u64,
+    pub activation_epoch: u64,
+    pub sequence: u64,
+    pub digest: [u8; 32],
+}
+
+impl DurableTransition {
+    fn validate_structure(&self) -> io::Result<()> {
+        if self.version != DURABLE_TRANSITION_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "unsupported durable transition version {}; expected {}",
+                    self.version, DURABLE_TRANSITION_VERSION
+                ),
+            ));
+        }
+        if self.activation_epoch == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "durable transition activation epoch must be non-zero",
+            ));
+        }
+        if self.sequence == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "durable transition sequence must be non-zero",
+            ));
+        }
+        let expected_sequence =
+            self.expected_previous_sequence
+                .checked_add(1)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "durable transition sequence overflow",
+                    )
+                })?;
+        if self.sequence != expected_sequence {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "durable transition sequence {} does not follow expected predecessor {}",
+                    self.sequence, self.expected_previous_sequence
+                ),
+            ));
+        }
+
+        if let Some(command) = &self.command {
+            if command.sequence != self.sequence {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "durable transition command sequence does not match transition sequence",
+                ));
+            }
+        }
+        if let Some(snapshot) = &self.snapshot {
+            if snapshot.actor_id != self.actor_id {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "durable transition snapshot actor does not match transition actor",
+                ));
+            }
+            if snapshot.sequence != self.sequence {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "durable transition snapshot sequence does not match transition sequence",
+                ));
+            }
+            if snapshot.activation_epoch != self.activation_epoch {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "durable transition snapshot activation epoch does not match transition epoch",
+                ));
+            }
+        }
+        if self
+            .workflow_events
+            .iter()
+            .any(|event| event.sequence() != self.sequence)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "durable transition workflow event sequence does not match transition sequence",
+            ));
+        }
+        for event in &self.workflow_events {
+            if let Some(activation) = event.activation_id() {
+                if activation.actor_id != self.actor_id {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "durable transition workflow activation actor does not match transition actor",
+                    ));
+                }
+                if let Some(command) = &self.command {
+                    if activation.command_sequence != command.sequence {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "durable transition workflow activation command sequence does not match accepted command",
+                        ));
+                    }
+                }
+            }
+        }
+        if self
+            .domain_events
+            .iter()
+            .any(|event| event.sequence != self.sequence)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "durable transition domain event sequence does not match transition sequence",
+            ));
+        }
+
+        let mut ordinals = BTreeSet::new();
+        for message in &self.outbox {
+            if !ordinals.insert(message.ordinal) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "duplicate durable outbox ordinal {} in transition",
+                        message.ordinal
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Canonical BLAKE3 identity of this transition.
+    pub fn digest(&self) -> io::Result<[u8; 32]> {
+        self.validate_structure()?;
+
+        #[derive(serde::Serialize)]
+        struct DigestEnvelope<'a> {
+            version: u16,
+            actor_id: u64,
+            activation_epoch: u64,
+            sequence: u64,
+            expected_previous_sequence: u64,
+            command: &'a Option<JournalEntry>,
+            snapshot: &'a Option<ActorSnapshot>,
+            workflow_events: &'a [WorkflowEvent],
+            domain_events: &'a [EventEntry],
+            durable_effects: Vec<Vec<u8>>,
+            outbox: &'a [DurableOutboxMessage],
+        }
+
+        let durable_effects = self
+            .durable_effects
+            .iter()
+            .map(|record| {
+                record
+                    .to_json()
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+
+        let mut value = serde_json::to_value(DigestEnvelope {
+            version: self.version,
+            actor_id: self.actor_id,
+            activation_epoch: self.activation_epoch,
+            sequence: self.sequence,
+            expected_previous_sequence: self.expected_previous_sequence,
+            command: &self.command,
+            snapshot: &self.snapshot,
+            workflow_events: &self.workflow_events,
+            domain_events: &self.domain_events,
+            durable_effects,
+            outbox: &self.outbox,
+        })
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+
+        canonicalize_json(&mut value);
+        let bytes = serde_json::to_vec(&value)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        Ok(*blake3::hash(&bytes).as_bytes())
+    }
+}
+
+fn canonicalize_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<_> = std::mem::take(map).into_iter().collect();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            for (_, child) in &mut entries {
+                canonicalize_json(child);
+            }
+            for (key, child) in entries {
+                map.insert(key, child);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                canonicalize_json(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Persistence backend trait. Implementations may be in-memory or disk-backed.
 pub trait PersistenceStore: Send + Sync {
+    /// Atomically commit one logical durable transition.
+    ///
+    /// Backends must return `Unsupported` until they can guarantee that all
+    /// Nulang-owned records in the transition commit together.
+    fn commit_transition(&mut self, _transition: DurableTransition) -> io::Result<DurableCommit> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "atomic durable transitions are not supported by this persistence backend",
+        ))
+    }
+
+    /// Load the committed atomic tail position for recovery classification.
+    ///
+    /// Backends that do not implement atomic durable transitions must return
+    /// `Unsupported`; callers use that to keep legacy recovery behavior
+    /// unchanged instead of inferring atomic history from ordinary journals.
+    fn load_durable_tail_position(
+        &self,
+        _actor_id: u64,
+    ) -> io::Result<Option<DurableTailPosition>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "atomic durable tail reads are not supported by this persistence backend",
+        ))
+    }
+
+    /// Load the newest durable record for one logical external effect.
+    ///
+    /// Backends that cannot recover durable-effect records MUST fail closed
+    /// with `Unsupported`; returning `Ok(None)` would let a caller mistake
+    /// "cannot inspect history" for "this effect never ran" and redispatch it.
+    fn load_durable_effect(
+        &self,
+        _actor_id: u64,
+        _effect_id: DurableEffectId,
+    ) -> io::Result<Option<DurableEffectPersistenceRecord>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "durable effect recovery reads are not supported by this persistence backend",
+        ))
+    }
+
     /// Persist a snapshot of durable actor state.
     fn save_snapshot(&mut self, snapshot: ActorSnapshot) -> io::Result<()>;
 
@@ -272,6 +703,7 @@ pub trait PersistenceStore: Send + Sync {
             actor_id,
             WorkflowEvent::TimerSet {
                 sequence,
+                replay_id: None,
                 name,
                 duration_ms,
             },
@@ -401,15 +833,171 @@ pub struct MemoryStore {
     journals: HashMap<u64, Vec<JournalEntry>>,
     workflow_events: HashMap<u64, Vec<WorkflowEvent>>,
     events: HashMap<u64, Vec<EventEntry>>,
+    durable_tails: HashMap<u64, DurableTail>,
+    committed_transitions: HashMap<u64, Vec<DurableTransition>>,
 }
 
 impl MemoryStore {
     pub fn new() -> Self {
         Self::default()
     }
+
+    pub fn durable_tail(&self, actor_id: u64) -> Option<DurableTail> {
+        self.durable_tails.get(&actor_id).copied()
+    }
+
+    pub fn committed_transitions(&self, actor_id: u64) -> &[DurableTransition] {
+        self.committed_transitions
+            .get(&actor_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
 }
 
 impl PersistenceStore for MemoryStore {
+    fn load_durable_tail_position(&self, actor_id: u64) -> io::Result<Option<DurableTailPosition>> {
+        Ok(self
+            .durable_tails
+            .get(&actor_id)
+            .map(|tail| DurableTailPosition {
+                activation_epoch: tail.activation_epoch,
+                sequence: tail.sequence,
+            }))
+    }
+
+    fn load_durable_effect(
+        &self,
+        actor_id: u64,
+        effect_id: DurableEffectId,
+    ) -> io::Result<Option<DurableEffectPersistenceRecord>> {
+        Ok(self
+            .committed_transitions(actor_id)
+            .iter()
+            .rev()
+            .flat_map(|transition| transition.durable_effects.iter().rev())
+            .find(|record| record.effect().spec().id == effect_id)
+            .cloned())
+    }
+
+    fn commit_transition(&mut self, transition: DurableTransition) -> io::Result<DurableCommit> {
+        transition.validate_structure()?;
+        let digest = transition.digest()?;
+
+        if let Some(tail) = self.durable_tails.get(&transition.actor_id).copied() {
+            if transition.activation_epoch == tail.activation_epoch
+                && transition.sequence == tail.sequence
+            {
+                if digest == tail.digest {
+                    return Ok(DurableCommit {
+                        actor_id: transition.actor_id,
+                        activation_epoch: tail.activation_epoch,
+                        sequence: tail.sequence,
+                        digest,
+                    });
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "conflicting durable transition already committed at this epoch/sequence",
+                ));
+            }
+            if transition.activation_epoch < tail.activation_epoch {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "stale durable activation epoch {}; committed epoch is {}",
+                        transition.activation_epoch, tail.activation_epoch
+                    ),
+                ));
+            }
+            if transition.expected_previous_sequence != tail.sequence {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "durable transition predecessor {} does not match committed tail {}",
+                        transition.expected_previous_sequence, tail.sequence
+                    ),
+                ));
+            }
+        } else {
+            // Atomic transitions may begin after legacy snapshot/journal history.
+            // The first atomic commit must extend the actually persisted legacy
+            // tail rather than pretending that history started at sequence 0.
+            let snapshot_seq = self
+                .snapshots
+                .get(&transition.actor_id)
+                .map(|snapshot| snapshot.sequence)
+                .unwrap_or(0);
+            let journal_seq = self
+                .journals
+                .get(&transition.actor_id)
+                .and_then(|entries| entries.last().map(|entry| entry.sequence))
+                .unwrap_or(0);
+            let workflow_seq = self
+                .workflow_events
+                .get(&transition.actor_id)
+                .and_then(|events| events.last().map(WorkflowEvent::sequence))
+                .unwrap_or(0);
+            let domain_seq = self
+                .events
+                .get(&transition.actor_id)
+                .and_then(|events| events.last().map(|event| event.sequence))
+                .unwrap_or(0);
+            let legacy_tail = snapshot_seq
+                .max(journal_seq)
+                .max(workflow_seq)
+                .max(domain_seq);
+            if transition.expected_previous_sequence != legacy_tail {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "first atomic durable transition predecessor {} does not match legacy tail {}",
+                        transition.expected_previous_sequence, legacy_tail
+                    ),
+                ));
+            }
+        }
+
+        if let Some(snapshot) = &transition.snapshot {
+            self.snapshots.insert(transition.actor_id, snapshot.clone());
+        }
+        if let Some(command) = &transition.command {
+            self.journals
+                .entry(transition.actor_id)
+                .or_default()
+                .push(command.clone());
+        }
+        if !transition.workflow_events.is_empty() {
+            self.workflow_events
+                .entry(transition.actor_id)
+                .or_default()
+                .extend(transition.workflow_events.iter().cloned());
+        }
+        if !transition.domain_events.is_empty() {
+            self.events
+                .entry(transition.actor_id)
+                .or_default()
+                .extend(transition.domain_events.iter().cloned());
+        }
+
+        let tail = DurableTail {
+            activation_epoch: transition.activation_epoch,
+            sequence: transition.sequence,
+            digest,
+        };
+        self.durable_tails.insert(transition.actor_id, tail);
+        self.committed_transitions
+            .entry(transition.actor_id)
+            .or_default()
+            .push(transition.clone());
+
+        Ok(DurableCommit {
+            actor_id: transition.actor_id,
+            activation_epoch: transition.activation_epoch,
+            sequence: transition.sequence,
+            digest,
+        })
+    }
+
     fn save_snapshot(&mut self, snapshot: ActorSnapshot) -> io::Result<()> {
         self.snapshots.insert(snapshot.actor_id, snapshot);
         Ok(())
@@ -473,10 +1061,16 @@ impl PersistenceStore for MemoryStore {
             .get(&actor_id)
             .and_then(|e| e.last().map(|ev| ev.sequence))
             .unwrap_or(0);
+        let transition_seq = self
+            .durable_tails
+            .get(&actor_id)
+            .map(|tail| tail.sequence)
+            .unwrap_or(0);
         snapshot_seq
             .max(journal_seq)
             .max(wf_event_seq)
             .max(event_seq)
+            .max(transition_seq)
     }
 
     fn clear(&mut self, actor_id: u64) -> io::Result<()> {
@@ -484,6 +1078,8 @@ impl PersistenceStore for MemoryStore {
         self.journals.remove(&actor_id);
         self.workflow_events.remove(&actor_id);
         self.events.remove(&actor_id);
+        self.durable_tails.remove(&actor_id);
+        self.committed_transitions.remove(&actor_id);
         Ok(())
     }
 }
@@ -849,14 +1445,26 @@ impl LibsqlStore {
                 "CREATE TABLE IF NOT EXISTS snapshots (
                     actor_id INTEGER PRIMARY KEY,
                     sequence INTEGER NOT NULL,
+                    activation_epoch INTEGER NOT NULL DEFAULT 1,
                     state TEXT NOT NULL,
                     waiting_signal TEXT,
-                    crdt_snapshot TEXT
+                    crdt_snapshot TEXT,
+                    crdt_field_map TEXT,
+                    schema_name TEXT,
+                    authority_tokens TEXT
                 )",
                 (),
             )
             .await
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            // Durable activation fencing was added after the original snapshot schema.
+            // Legacy rows represent the initial activation and therefore default to 1.
+            let _ = conn
+                .execute(
+                    "ALTER TABLE snapshots ADD COLUMN activation_epoch INTEGER NOT NULL DEFAULT 1",
+                    (),
+                )
+                .await;
             // Migrate databases created before the waiting_signal column existed.
             let _ = conn
                 .execute("ALTER TABLE snapshots ADD COLUMN waiting_signal TEXT", ())
@@ -864,6 +1472,20 @@ impl LibsqlStore {
             // Migrate databases created before the crdt_snapshot column existed.
             let _ = conn
                 .execute("ALTER TABLE snapshots ADD COLUMN crdt_snapshot TEXT", ())
+                .await;
+            // Migrate databases created before the crdt_field_map column existed.
+            let _ = conn
+                .execute("ALTER TABLE snapshots ADD COLUMN crdt_field_map TEXT", ())
+                .await;
+            // Durable schema identity was added after the original persistence
+            // schema. Legacy rows remain NULL and follow the explicit legacy policy.
+            let _ = conn
+                .execute("ALTER TABLE snapshots ADD COLUMN schema_name TEXT", ())
+                .await;
+            // Authority was added after the original persistence schema. Old rows
+            // remain NULL and therefore restore with empty (deny-by-default) authority.
+            let _ = conn
+                .execute("ALTER TABLE snapshots ADD COLUMN authority_tokens TEXT", ())
                 .await;
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS journal (
@@ -897,6 +1519,84 @@ impl LibsqlStore {
                     args TEXT NOT NULL,
                     value TEXT NOT NULL DEFAULT '1',
                     PRIMARY KEY (actor_id, sequence)
+                )",
+                (),
+            )
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            // Atomic durable-transition storage (RFC 0022). These tables are
+            // additive to the legacy snapshot/journal tables so historical
+            // stores remain readable while new commits gain one transaction
+            // boundary and explicit fencing metadata.
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS durable_tails (
+                    actor_id INTEGER PRIMARY KEY,
+                    activation_epoch INTEGER NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    digest TEXT NOT NULL
+                )",
+                (),
+            )
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS durable_transitions (
+                    actor_id INTEGER NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    activation_epoch INTEGER NOT NULL,
+                    expected_previous_sequence INTEGER NOT NULL,
+                    digest TEXT NOT NULL,
+                    PRIMARY KEY (actor_id, sequence)
+                )",
+                (),
+            )
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS durable_workflow_events (
+                    actor_id INTEGER NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    event TEXT NOT NULL,
+                    PRIMARY KEY (actor_id, sequence, ordinal)
+                )",
+                (),
+            )
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS durable_domain_events (
+                    actor_id INTEGER NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    event TEXT NOT NULL,
+                    PRIMARY KEY (actor_id, sequence, ordinal)
+                )",
+                (),
+            )
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS durable_effect_records (
+                    actor_id INTEGER NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    record TEXT NOT NULL,
+                    PRIMARY KEY (actor_id, sequence, ordinal)
+                )",
+                (),
+            )
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS durable_outbox (
+                    actor_id INTEGER NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    destination_actor_id INTEGER NOT NULL,
+                    behavior_id INTEGER NOT NULL,
+                    payload TEXT NOT NULL,
+                    PRIMARY KEY (actor_id, sequence, ordinal)
                 )",
                 (),
             )
@@ -968,17 +1668,464 @@ impl LibsqlStore {
 
 #[cfg(feature = "sqlite")]
 impl PersistenceStore for LibsqlStore {
+    fn load_durable_tail_position(&self, actor_id: u64) -> io::Result<Option<DurableTailPosition>> {
+        let conn = self.conn();
+        self.rt.block_on(async {
+            let mut rows = conn
+                .query(
+                    "SELECT activation_epoch, sequence
+                     FROM durable_tails
+                     WHERE actor_id = ?1",
+                    libsql::params![actor_id as i64],
+                )
+                .await
+                .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
+
+            match rows
+                .next()
+                .await
+                .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?
+            {
+                Some(row) => {
+                    let activation_epoch: i64 = row.get(0).map_err(|error| {
+                        io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+                    })?;
+                    let sequence: i64 = row.get(1).map_err(|error| {
+                        io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+                    })?;
+                    Ok(Some(DurableTailPosition {
+                        activation_epoch: activation_epoch as u64,
+                        sequence: sequence as u64,
+                    }))
+                }
+                None => Ok(None),
+            }
+        })
+    }
+
+    fn load_durable_effect(
+        &self,
+        actor_id: u64,
+        effect_id: DurableEffectId,
+    ) -> io::Result<Option<DurableEffectPersistenceRecord>> {
+        let conn = self.conn();
+        self.rt.block_on(async {
+            let mut rows = conn
+                .query(
+                    "SELECT record FROM durable_effect_records
+                     WHERE actor_id = ?1
+                     ORDER BY sequence DESC, ordinal DESC",
+                    libsql::params![actor_id as i64],
+                )
+                .await
+                .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
+
+            while let Some(row) = rows
+                .next()
+                .await
+                .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?
+            {
+                let json: String = row.get(0).map_err(|error| {
+                    io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+                })?;
+                let record = DurableEffectPersistenceRecord::from_json(json.as_bytes())
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                if record.effect().spec().id == effect_id {
+                    return Ok(Some(record));
+                }
+            }
+            Ok(None)
+        })
+    }
+
+    fn commit_transition(&mut self, transition: DurableTransition) -> io::Result<DurableCommit> {
+        transition.validate_structure()?;
+        let digest = transition.digest()?;
+        let digest_hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+
+        // Serialize everything before opening the transaction. Once the first
+        // SQL write happens, only database operations remain fallible and any
+        // error rolls the entire transition back.
+        let snapshot_data = transition
+            .snapshot
+            .as_ref()
+            .map(|snapshot| {
+                Ok::<_, io::Error>((
+                    serde_json::to_string(&snapshot.state)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+                    serde_json::to_string(&snapshot.crdt_snapshot)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+                    serde_json::to_string(&snapshot.crdt_field_map)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+                    snapshot.schema_name.clone(),
+                    serde_json::to_string(&snapshot.authority_tokens)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+                ))
+            })
+            .transpose()?;
+        let command_payload = transition
+            .command
+            .as_ref()
+            .map(|entry| {
+                serde_json::to_string(&entry.payload)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            })
+            .transpose()?;
+        let workflow_json = transition
+            .workflow_events
+            .iter()
+            .map(|event| {
+                serde_json::to_string(event)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let domain_json = transition
+            .domain_events
+            .iter()
+            .map(|event| {
+                serde_json::to_string(event)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let effect_json = transition
+            .durable_effects
+            .iter()
+            .map(|record| {
+                let bytes = record
+                    .to_json()
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                String::from_utf8(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let outbox_payload_json = transition
+            .outbox
+            .iter()
+            .map(|message| {
+                serde_json::to_string(&message.payload)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+
+        let conn = self.conn();
+        self.rt.block_on(async {
+            let tx = conn
+                .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+            let current_tail = {
+                let mut rows = tx
+                    .query(
+                        "SELECT activation_epoch, sequence, digest
+                         FROM durable_tails WHERE actor_id = ?1",
+                        libsql::params![transition.actor_id as i64],
+                    )
+                    .await
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                match rows
+                    .next()
+                    .await
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
+                {
+                    Some(row) => {
+                        let epoch: i64 = row
+                            .get(0)
+                            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+                        let sequence: i64 = row
+                            .get(1)
+                            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+                        let stored_digest: String = row
+                            .get(2)
+                            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+                        Some((epoch as u64, sequence as u64, stored_digest))
+                    }
+                    None => None,
+                }
+            };
+
+            if let Some((epoch, sequence, stored_digest)) = &current_tail {
+                if transition.activation_epoch == *epoch && transition.sequence == *sequence {
+                    if stored_digest == &digest_hex {
+                        tx.commit()
+                            .await
+                            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                        return Ok(DurableCommit {
+                            actor_id: transition.actor_id,
+                            activation_epoch: transition.activation_epoch,
+                            sequence: transition.sequence,
+                            digest,
+                        });
+                    }
+                    let _ = tx.rollback().await;
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "conflicting durable transition already committed at this epoch/sequence",
+                    ));
+                }
+                if transition.activation_epoch < *epoch {
+                    let _ = tx.rollback().await;
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!(
+                            "stale durable activation epoch {}; committed epoch is {}",
+                            transition.activation_epoch, epoch
+                        ),
+                    ));
+                }
+                if transition.expected_previous_sequence != *sequence {
+                    let _ = tx.rollback().await;
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "durable transition predecessor {} does not match committed tail {}",
+                            transition.expected_previous_sequence, sequence
+                        ),
+                    ));
+                }
+            } else {
+                // Continue legacy history on the first atomic commit. This is
+                // evaluated inside the same write transaction so no legacy
+                // writer can advance the tail between validation and commit.
+                let mut rows = tx
+                    .query(
+                        "SELECT COALESCE(MAX(sequence), 0) FROM (
+                            SELECT sequence FROM snapshots WHERE actor_id = ?1
+                            UNION ALL
+                            SELECT sequence FROM journal WHERE actor_id = ?1
+                            UNION ALL
+                            SELECT sequence FROM workflow_events WHERE actor_id = ?1
+                            UNION ALL
+                            SELECT sequence FROM events WHERE actor_id = ?1
+                         )",
+                        libsql::params![transition.actor_id as i64],
+                    )
+                    .await
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                let row = rows
+                    .next()
+                    .await
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "failed to read legacy durable tail",
+                        )
+                    })?;
+                let legacy_tail: i64 = row
+                    .get(0)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+                drop(rows);
+                if transition.expected_previous_sequence != legacy_tail as u64 {
+                    let _ = tx.rollback().await;
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "first atomic durable transition predecessor {} does not match legacy tail {}",
+                            transition.expected_previous_sequence, legacy_tail
+                        ),
+                    ));
+                }
+            }
+
+            if let (
+                Some(snapshot),
+                Some((state_json, crdt_json, crdt_field_map_json, schema_name, authority_json)),
+            ) = (&transition.snapshot, &snapshot_data)
+            {
+                tx.execute(
+                    "INSERT INTO snapshots
+                     (actor_id, sequence, activation_epoch, state, waiting_signal, crdt_snapshot, crdt_field_map, schema_name, authority_tokens)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                     ON CONFLICT(actor_id) DO UPDATE SET
+                       sequence=excluded.sequence,
+                       activation_epoch=excluded.activation_epoch,
+                       state=excluded.state,
+                       waiting_signal=excluded.waiting_signal,
+                       crdt_snapshot=excluded.crdt_snapshot,
+                       crdt_field_map=excluded.crdt_field_map,
+                       schema_name=excluded.schema_name,
+                       authority_tokens=excluded.authority_tokens",
+                    libsql::params![
+                        snapshot.actor_id as i64,
+                        snapshot.sequence as i64,
+                        snapshot.activation_epoch as i64,
+                        state_json.as_str(),
+                        snapshot.waiting_signal.as_deref(),
+                        crdt_json.as_str(),
+                        crdt_field_map_json.as_str(),
+                        schema_name.as_deref(),
+                        authority_json.as_str()
+                    ],
+                )
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            }
+
+            if let (Some(command), Some(payload_json)) = (&transition.command, &command_payload) {
+                tx.execute(
+                    "INSERT INTO journal (actor_id, sequence, behavior_id, payload)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    libsql::params![
+                        transition.actor_id as i64,
+                        command.sequence as i64,
+                        command.behavior_id as i64,
+                        payload_json.as_str()
+                    ],
+                )
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            }
+
+            for (ordinal, event_json) in workflow_json.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO durable_workflow_events (actor_id, sequence, ordinal, event)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    libsql::params![
+                        transition.actor_id as i64,
+                        transition.sequence as i64,
+                        ordinal as i64,
+                        event_json.as_str()
+                    ],
+                )
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            }
+
+            for (ordinal, event_json) in domain_json.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO durable_domain_events (actor_id, sequence, ordinal, event)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    libsql::params![
+                        transition.actor_id as i64,
+                        transition.sequence as i64,
+                        ordinal as i64,
+                        event_json.as_str()
+                    ],
+                )
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            }
+
+            for (ordinal, record_json) in effect_json.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO durable_effect_records (actor_id, sequence, ordinal, record)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    libsql::params![
+                        transition.actor_id as i64,
+                        transition.sequence as i64,
+                        ordinal as i64,
+                        record_json.as_str()
+                    ],
+                )
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            }
+
+            for (message, payload_json) in transition.outbox.iter().zip(&outbox_payload_json) {
+                tx.execute(
+                    "INSERT INTO durable_outbox
+                     (actor_id, sequence, ordinal, destination_actor_id, behavior_id, payload)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    libsql::params![
+                        transition.actor_id as i64,
+                        transition.sequence as i64,
+                        message.ordinal as i64,
+                        message.destination_actor_id as i64,
+                        message.behavior_id as i64,
+                        payload_json.as_str()
+                    ],
+                )
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            }
+
+            tx.execute(
+                "INSERT INTO durable_transitions
+                 (actor_id, sequence, activation_epoch, expected_previous_sequence, digest)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                libsql::params![
+                    transition.actor_id as i64,
+                    transition.sequence as i64,
+                    transition.activation_epoch as i64,
+                    transition.expected_previous_sequence as i64,
+                    digest_hex.as_str()
+                ],
+            )
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+            if let Some((old_epoch, old_sequence, old_digest)) = current_tail {
+                let changed = tx
+                    .execute(
+                        "UPDATE durable_tails
+                         SET activation_epoch = ?1, sequence = ?2, digest = ?3
+                         WHERE actor_id = ?4
+                           AND activation_epoch = ?5
+                           AND sequence = ?6
+                           AND digest = ?7",
+                        libsql::params![
+                            transition.activation_epoch as i64,
+                            transition.sequence as i64,
+                            digest_hex.as_str(),
+                            transition.actor_id as i64,
+                            old_epoch as i64,
+                            old_sequence as i64,
+                            old_digest.as_str()
+                        ],
+                    )
+                    .await
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                if changed != 1 {
+                    let _ = tx.rollback().await;
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "durable tail changed while committing transition",
+                    ));
+                }
+            } else {
+                tx.execute(
+                    "INSERT INTO durable_tails
+                     (actor_id, activation_epoch, sequence, digest)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    libsql::params![
+                        transition.actor_id as i64,
+                        transition.activation_epoch as i64,
+                        transition.sequence as i64,
+                        digest_hex.as_str()
+                    ],
+                )
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            }
+
+            tx.commit()
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+            Ok(DurableCommit {
+                actor_id: transition.actor_id,
+                activation_epoch: transition.activation_epoch,
+                sequence: transition.sequence,
+                digest,
+            })
+        })
+    }
+
     fn save_snapshot(&mut self, snapshot: ActorSnapshot) -> io::Result<()> {
         let state_json = serde_json::to_string(&snapshot.state)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let crdt_json = serde_json::to_string(&snapshot.crdt_snapshot)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let crdt_field_map_json = serde_json::to_string(&snapshot.crdt_field_map)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let authority_json = serde_json::to_string(&snapshot.authority_tokens)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let conn = self.conn();
         self.rt.block_on(async {
             conn.execute(
-                "INSERT INTO snapshots (actor_id, sequence, state, waiting_signal, crdt_snapshot) VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(actor_id) DO UPDATE SET sequence=excluded.sequence, state=excluded.state, waiting_signal=excluded.waiting_signal, crdt_snapshot=excluded.crdt_snapshot",
-                libsql::params![snapshot.actor_id as i64, snapshot.sequence as i64, state_json, snapshot.waiting_signal.as_deref(), crdt_json.as_str()],
+                "INSERT INTO snapshots (actor_id, sequence, activation_epoch, state, waiting_signal, crdt_snapshot, crdt_field_map, schema_name, authority_tokens) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(actor_id) DO UPDATE SET sequence=excluded.sequence, activation_epoch=excluded.activation_epoch, state=excluded.state, waiting_signal=excluded.waiting_signal, crdt_snapshot=excluded.crdt_snapshot, crdt_field_map=excluded.crdt_field_map, schema_name=excluded.schema_name, authority_tokens=excluded.authority_tokens",
+                libsql::params![snapshot.actor_id as i64, snapshot.sequence as i64, snapshot.activation_epoch as i64, state_json, snapshot.waiting_signal.as_deref(), crdt_json.as_str(), crdt_field_map_json.as_str(), snapshot.schema_name.as_deref(), authority_json.as_str()],
             ).await.map(|_| ()).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
         })
     }
@@ -988,27 +2135,52 @@ impl PersistenceStore for LibsqlStore {
         self.rt.block_on(async {
             let mut rows = conn
                 .query(
-                    "SELECT sequence, state, waiting_signal, crdt_snapshot FROM snapshots WHERE actor_id = ?1",
+                    "SELECT sequence, activation_epoch, state, waiting_signal, crdt_snapshot, crdt_field_map, schema_name, authority_tokens FROM snapshots WHERE actor_id = ?1",
                     libsql::params![actor_id as i64],
                 )
                 .await
                 .ok()?;
             let row = rows.next().await.ok()??;
             let sequence: i64 = row.get(0).ok()?;
-            let state_json: String = row.get(1).ok()?;
-            let waiting_signal: Option<String> = row.get(2).ok()?;
-            let crdt_json: Option<String> = row.get(3).ok()?;
+            let activation_epoch: i64 = row.get(1).ok()?;
+            let state_json: String = row.get(2).ok()?;
+            let waiting_signal: Option<String> = row.get(3).ok()?;
+            let crdt_json: Option<String> = row.get(4).ok()?;
+            let crdt_field_map_json: Option<String> = row.get(5).ok()?;
+            let schema_name: Option<String> = row.get(6).ok()?;
+            let authority_json: Option<String> = row.get(7).ok()?;
             let crdt_snapshot: Option<Vec<(u64, u8, Vec<u8>)>> = match crdt_json {
                 Some(j) => serde_json::from_str(&j).ok()?,
                 None => None,
+            };
+            let crdt_field_map: Option<HashMap<String, u64>> = match crdt_field_map_json {
+                Some(j) => serde_json::from_str(&j).ok()?,
+                None => None,
+            };
+            let authority_tokens: BTreeSet<String> = match authority_json {
+                Some(json) => match serde_json::from_str(&json) {
+                    Ok(tokens) => tokens,
+                    Err(err) => {
+                        warn!(
+                            "nulang-persist: invalid authority metadata for actor {}: {}",
+                            actor_id, err
+                        );
+                        return None;
+                    }
+                },
+                None => BTreeSet::new(),
             };
             let state: HashMap<String, PersistedValue> = serde_json::from_str(&state_json).ok()?;
             Some(ActorSnapshot {
                 actor_id,
                 sequence: sequence as u64,
+                activation_epoch: activation_epoch as u64,
                 state,
                 waiting_signal,
                 crdt_snapshot,
+                crdt_field_map,
+                schema_name,
+                authority_tokens,
             })
         })
     }
@@ -1092,33 +2264,57 @@ impl PersistenceStore for LibsqlStore {
     fn read_workflow_events(&self, actor_id: u64) -> Vec<WorkflowEvent> {
         let conn = self.conn();
         self.rt.block_on(async {
-            let mut rows = match conn
+            let mut events = Vec::new();
+
+            if let Ok(mut rows) = conn
                 .query(
                     "SELECT event FROM workflow_events
-                 WHERE actor_id = ?1 ORDER BY sequence ASC",
+                     WHERE actor_id = ?1 ORDER BY sequence ASC",
                     libsql::params![actor_id as i64],
                 )
                 .await
             {
-                Ok(r) => r,
-                Err(_) => return Vec::new(),
-            };
-            let mut events = Vec::new();
-            loop {
-                match rows.next().await {
-                    Ok(Some(row)) => {
-                        let event_json: String = match row.get(0) {
-                            Ok(v) => v,
-                            Err(_) => continue,
-                        };
-                        if let Ok(event) = serde_json::from_str(&event_json) {
-                            events.push(event);
+                loop {
+                    match rows.next().await {
+                        Ok(Some(row)) => {
+                            let event_json: String = match row.get(0) {
+                                Ok(value) => value,
+                                Err(_) => continue,
+                            };
+                            if let Ok(event) = serde_json::from_str(&event_json) {
+                                events.push(event);
+                            }
                         }
+                        Ok(None) | Err(_) => break,
                     }
-                    Ok(None) => break,
-                    Err(_) => break,
                 }
             }
+
+            if let Ok(mut rows) = conn
+                .query(
+                    "SELECT event FROM durable_workflow_events
+                     WHERE actor_id = ?1 ORDER BY sequence ASC, ordinal ASC",
+                    libsql::params![actor_id as i64],
+                )
+                .await
+            {
+                loop {
+                    match rows.next().await {
+                        Ok(Some(row)) => {
+                            let event_json: String = match row.get(0) {
+                                Ok(value) => value,
+                                Err(_) => continue,
+                            };
+                            if let Ok(event) = serde_json::from_str(&event_json) {
+                                events.push(event);
+                            }
+                        }
+                        Ok(None) | Err(_) => break,
+                    }
+                }
+            }
+
+            events.sort_by_key(WorkflowEvent::sequence);
             events
         })
     }
@@ -1140,61 +2336,85 @@ impl PersistenceStore for LibsqlStore {
     fn read_events(&self, actor_id: u64) -> Vec<EventEntry> {
         let conn = self.conn();
         self.rt.block_on(async {
-            let mut rows = match conn
+            let mut entries = Vec::new();
+
+            if let Ok(mut rows) = conn
                 .query(
                     "SELECT sequence, field_name, event_name, args, value FROM events
-                 WHERE actor_id = ?1 ORDER BY sequence ASC",
+                     WHERE actor_id = ?1 ORDER BY sequence ASC",
                     libsql::params![actor_id as i64],
                 )
                 .await
             {
-                Ok(r) => r,
-                Err(_) => return Vec::new(),
-            };
-            let mut entries = Vec::new();
-            loop {
-                match rows.next().await {
-                    Ok(Some(row)) => {
-                        let seq: i64 = match row.get(0) {
-                            Ok(v) => v,
-                            Err(_) => continue,
-                        };
-                        let field_name: String = match row.get(1) {
-                            Ok(v) => v,
-                            Err(_) => continue,
-                        };
-                        let event_name: String = match row.get(2) {
-                            Ok(v) => v,
-                            Err(_) => continue,
-                        };
-                        let args_json: String = match row.get(3) {
-                            Ok(v) => v,
-                            Err(_) => continue,
-                        };
-                        let args: Vec<PersistedValue> = match serde_json::from_str(&args_json) {
-                            Ok(p) => p,
-                            Err(_) => continue,
-                        };
-                        let value_json: String = match row.get(4) {
-                            Ok(v) => v,
-                            Err(_) => continue,
-                        };
-                        let value: PersistedValue = match serde_json::from_str(&value_json) {
-                            Ok(v) => v,
-                            Err(_) => continue,
-                        };
-                        entries.push(EventEntry {
-                            sequence: seq as u64,
-                            field_name,
-                            event_name,
-                            args,
-                            value,
-                        });
+                loop {
+                    match rows.next().await {
+                        Ok(Some(row)) => {
+                            let sequence: i64 = match row.get(0) {
+                                Ok(value) => value,
+                                Err(_) => continue,
+                            };
+                            let field_name: String = match row.get(1) {
+                                Ok(value) => value,
+                                Err(_) => continue,
+                            };
+                            let event_name: String = match row.get(2) {
+                                Ok(value) => value,
+                                Err(_) => continue,
+                            };
+                            let args_json: String = match row.get(3) {
+                                Ok(value) => value,
+                                Err(_) => continue,
+                            };
+                            let value_json: String = match row.get(4) {
+                                Ok(value) => value,
+                                Err(_) => continue,
+                            };
+                            let args = match serde_json::from_str(&args_json) {
+                                Ok(value) => value,
+                                Err(_) => continue,
+                            };
+                            let value = match serde_json::from_str(&value_json) {
+                                Ok(value) => value,
+                                Err(_) => continue,
+                            };
+                            entries.push(EventEntry {
+                                sequence: sequence as u64,
+                                field_name,
+                                event_name,
+                                args,
+                                value,
+                            });
+                        }
+                        Ok(None) | Err(_) => break,
                     }
-                    Ok(None) => break,
-                    Err(_) => break,
                 }
             }
+
+            if let Ok(mut rows) = conn
+                .query(
+                    "SELECT event FROM durable_domain_events
+                     WHERE actor_id = ?1 ORDER BY sequence ASC, ordinal ASC",
+                    libsql::params![actor_id as i64],
+                )
+                .await
+            {
+                loop {
+                    match rows.next().await {
+                        Ok(Some(row)) => {
+                            let event_json: String = match row.get(0) {
+                                Ok(value) => value,
+                                Err(_) => continue,
+                            };
+                            if let Ok(event) = serde_json::from_str(&event_json) {
+                                entries.push(event);
+                            }
+                        }
+                        Ok(None) | Err(_) => break,
+                    }
+                }
+            }
+
+            entries.sort_by_key(|entry| entry.sequence);
             entries
         })
     }
@@ -1203,80 +2423,796 @@ impl PersistenceStore for LibsqlStore {
         let conn = self.conn();
         self.rt.block_on(async {
             let snapshot_seq: Option<i64> = async {
-                let mut rows = conn.query(
-                    "SELECT sequence FROM snapshots WHERE actor_id = ?1",
-                    libsql::params![actor_id as i64],
-                ).await.ok()?;
+                let mut rows = conn
+                    .query(
+                        "SELECT sequence FROM snapshots WHERE actor_id = ?1",
+                        libsql::params![actor_id as i64],
+                    )
+                    .await
+                    .ok()?;
                 let row = rows.next().await.ok()??;
                 row.get(0).ok()
-            }.await;
+            }
+            .await;
             let journal_seq: Option<i64> = async {
-                let mut rows = conn.query(
-                    "SELECT sequence FROM journal WHERE actor_id = ?1 ORDER BY sequence DESC LIMIT 1",
-                    libsql::params![actor_id as i64],
-                ).await.ok()?;
+                let mut rows = conn
+                    .query(
+                        "SELECT sequence FROM journal WHERE actor_id = ?1 ORDER BY sequence DESC LIMIT 1",
+                        libsql::params![actor_id as i64],
+                    )
+                    .await
+                    .ok()?;
                 let row = rows.next().await.ok()??;
                 row.get(0).ok()
-            }.await;
+            }
+            .await;
             let wf_event_seq: Option<i64> = async {
-                let mut rows = conn.query(
-                    "SELECT sequence FROM workflow_events WHERE actor_id = ?1 ORDER BY sequence DESC LIMIT 1",
-                    libsql::params![actor_id as i64],
-                ).await.ok()?;
+                let mut rows = conn
+                    .query(
+                        "SELECT sequence FROM workflow_events WHERE actor_id = ?1 ORDER BY sequence DESC LIMIT 1",
+                        libsql::params![actor_id as i64],
+                    )
+                    .await
+                    .ok()?;
                 let row = rows.next().await.ok()??;
                 row.get(0).ok()
-            }.await;
+            }
+            .await;
             let event_seq: Option<i64> = async {
-                let mut rows = conn.query(
-                    "SELECT sequence FROM events WHERE actor_id = ?1 ORDER BY sequence DESC LIMIT 1",
-                    libsql::params![actor_id as i64],
-                ).await.ok()?;
+                let mut rows = conn
+                    .query(
+                        "SELECT sequence FROM events WHERE actor_id = ?1 ORDER BY sequence DESC LIMIT 1",
+                        libsql::params![actor_id as i64],
+                    )
+                    .await
+                    .ok()?;
                 let row = rows.next().await.ok()??;
                 row.get(0).ok()
-            }.await;
-            snapshot_seq.unwrap_or(0)
+            }
+            .await;
+            let atomic_seq: Option<i64> = async {
+                let mut rows = conn
+                    .query(
+                        "SELECT sequence FROM durable_tails WHERE actor_id = ?1",
+                        libsql::params![actor_id as i64],
+                    )
+                    .await
+                    .ok()?;
+                let row = rows.next().await.ok()??;
+                row.get(0).ok()
+            }
+            .await;
+
+            snapshot_seq
+                .unwrap_or(0)
                 .max(journal_seq.unwrap_or(0))
                 .max(wf_event_seq.unwrap_or(0))
-                .max(event_seq.unwrap_or(0)) as u64
+                .max(event_seq.unwrap_or(0))
+                .max(atomic_seq.unwrap_or(0)) as u64
         })
     }
 
     fn clear(&mut self, actor_id: u64) -> io::Result<()> {
         let conn = self.conn();
         self.rt.block_on(async {
-            conn.execute(
-                "DELETE FROM snapshots WHERE actor_id = ?1",
-                libsql::params![actor_id as i64],
-            )
-            .await
-            .map(|_| ())
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-            conn.execute(
-                "DELETE FROM journal WHERE actor_id = ?1",
-                libsql::params![actor_id as i64],
-            )
-            .await
-            .map(|_| ())
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-            conn.execute(
-                "DELETE FROM workflow_events WHERE actor_id = ?1",
-                libsql::params![actor_id as i64],
-            )
-            .await
-            .map(|_| ())
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-            conn.execute(
-                "DELETE FROM events WHERE actor_id = ?1",
-                libsql::params![actor_id as i64],
-            )
-            .await
-            .map(|_| ())
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            for table in [
+                "snapshots",
+                "journal",
+                "workflow_events",
+                "events",
+                "durable_workflow_events",
+                "durable_domain_events",
+                "durable_effect_records",
+                "durable_outbox",
+                "durable_transitions",
+                "durable_tails",
+            ] {
+                let sql = format!("DELETE FROM {table} WHERE actor_id = ?1");
+                conn.execute(&sql, libsql::params![actor_id as i64])
+                    .await
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            }
             Ok(())
         })
     }
 }
 
+// ---------------------------------------------------------------------------
+// RocksDbStore — production LSM-tree persistence backend
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "rocksdb")]
+pub struct RocksDbStore {
+    db: rocksdb::DB,
+}
+
+#[cfg(feature = "rocksdb")]
+impl RocksDbStore {
+    const CF_SNAPSHOTS: &'static str = "snapshots";
+    const CF_JOURNAL: &'static str = "journal";
+    const CF_WORKFLOW_EVENTS: &'static str = "workflow_events";
+    const CF_EVENTS: &'static str = "events";
+
+    /// Open (or create) a RocksDB-backed store at `path`.
+    pub fn new<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        let mut opts = rocksdb::Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        // Each actor's data is logically separated by key prefix; column
+        // families keep the four streams isolated so iteration and deletion
+        // stay cheap.
+        let cfs = vec![
+            rocksdb::ColumnFamilyDescriptor::new(Self::CF_SNAPSHOTS, rocksdb::Options::default()),
+            rocksdb::ColumnFamilyDescriptor::new(Self::CF_JOURNAL, rocksdb::Options::default()),
+            rocksdb::ColumnFamilyDescriptor::new(
+                Self::CF_WORKFLOW_EVENTS,
+                rocksdb::Options::default(),
+            ),
+            rocksdb::ColumnFamilyDescriptor::new(Self::CF_EVENTS, rocksdb::Options::default()),
+        ];
+        let db = rocksdb::DB::open_cf_descriptors(&opts, path, cfs)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        Ok(RocksDbStore { db })
+    }
+
+    fn actor_key(actor_id: u64) -> [u8; 8] {
+        actor_id.to_be_bytes()
+    }
+
+    fn actor_seq_key(actor_id: u64, sequence: u64) -> [u8; 16] {
+        let mut key = [0u8; 16];
+        key[..8].copy_from_slice(&actor_id.to_be_bytes());
+        key[8..].copy_from_slice(&sequence.to_be_bytes());
+        key
+    }
+
+    fn cf(&self, name: &str) -> io::Result<&rocksdb::ColumnFamily> {
+        self.db
+            .cf_handle(name)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("missing CF {}", name)))
+    }
+}
+
+#[cfg(feature = "rocksdb")]
+impl PersistenceStore for RocksDbStore {
+    fn save_snapshot(&mut self, snapshot: ActorSnapshot) -> io::Result<()> {
+        let cf = self.cf(Self::CF_SNAPSHOTS)?;
+        let json = serde_json::to_string(&snapshot)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        self.db
+            .put_cf(cf, Self::actor_key(snapshot.actor_id), json.as_bytes())
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        // RocksDB's `put` is durable once flushed.  Sync the WAL so the
+        // snapshot survives a process crash before we report success.
+        self.db
+            .flush_wal(true)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+    }
+
+    fn load_snapshot(&self, actor_id: u64) -> Option<ActorSnapshot> {
+        let cf = self.cf(Self::CF_SNAPSHOTS).ok()?;
+        let bytes = self.db.get_cf(cf, Self::actor_key(actor_id)).ok()??;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    fn append_journal(&mut self, actor_id: u64, entry: JournalEntry) -> io::Result<()> {
+        let cf = self.cf(Self::CF_JOURNAL)?;
+        let json = serde_json::to_string(&entry)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        self.db
+            .put_cf(
+                cf,
+                Self::actor_seq_key(actor_id, entry.sequence),
+                json.as_bytes(),
+            )
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        self.db
+            .flush_wal(true)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+    }
+
+    fn read_journal(&self, actor_id: u64) -> Vec<JournalEntry> {
+        let cf = match self.cf(Self::CF_JOURNAL) {
+            Ok(cf) => cf,
+            Err(_) => return Vec::new(),
+        };
+        let mut entries = Vec::new();
+        let start = Self::actor_seq_key(actor_id, 0);
+        let mut iter = self.db.iterator_cf(
+            cf,
+            rocksdb::IteratorMode::From(&start, rocksdb::Direction::Forward),
+        );
+        while let Some(Ok((key, value))) = iter.next() {
+            if key.len() < 8 || key[..8] != Self::actor_key(actor_id) {
+                break;
+            }
+            if let Ok(entry) = serde_json::from_slice::<JournalEntry>(&value) {
+                entries.push(entry);
+            }
+        }
+        entries
+    }
+
+    fn append_workflow_event(&mut self, actor_id: u64, event: WorkflowEvent) -> io::Result<()> {
+        let cf = self.cf(Self::CF_WORKFLOW_EVENTS)?;
+        let json = serde_json::to_string(&event)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        self.db
+            .put_cf(
+                cf,
+                Self::actor_seq_key(actor_id, event.sequence()),
+                json.as_bytes(),
+            )
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        self.db
+            .flush_wal(true)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+    }
+
+    fn read_workflow_events(&self, actor_id: u64) -> Vec<WorkflowEvent> {
+        let cf = match self.cf(Self::CF_WORKFLOW_EVENTS) {
+            Ok(cf) => cf,
+            Err(_) => return Vec::new(),
+        };
+        let mut events = Vec::new();
+        let start = Self::actor_seq_key(actor_id, 0);
+        let mut iter = self.db.iterator_cf(
+            cf,
+            rocksdb::IteratorMode::From(&start, rocksdb::Direction::Forward),
+        );
+        while let Some(Ok((key, value))) = iter.next() {
+            if key.len() < 8 || key[..8] != Self::actor_key(actor_id) {
+                break;
+            }
+            if let Ok(event) = serde_json::from_slice::<WorkflowEvent>(&value) {
+                events.push(event);
+            }
+        }
+        events
+    }
+
+    fn append_event(&mut self, actor_id: u64, entry: EventEntry) -> io::Result<()> {
+        let cf = self.cf(Self::CF_EVENTS)?;
+        let json = serde_json::to_string(&entry)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        self.db
+            .put_cf(
+                cf,
+                Self::actor_seq_key(actor_id, entry.sequence),
+                json.as_bytes(),
+            )
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        self.db
+            .flush_wal(true)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+    }
+
+    fn read_events(&self, actor_id: u64) -> Vec<EventEntry> {
+        let cf = match self.cf(Self::CF_EVENTS) {
+            Ok(cf) => cf,
+            Err(_) => return Vec::new(),
+        };
+        let mut entries = Vec::new();
+        let start = Self::actor_seq_key(actor_id, 0);
+        let mut iter = self.db.iterator_cf(
+            cf,
+            rocksdb::IteratorMode::From(&start, rocksdb::Direction::Forward),
+        );
+        while let Some(Ok((key, value))) = iter.next() {
+            if key.len() < 8 || key[..8] != Self::actor_key(actor_id) {
+                break;
+            }
+            if let Ok(entry) = serde_json::from_slice::<EventEntry>(&value) {
+                entries.push(entry);
+            }
+        }
+        entries
+    }
+
+    fn latest_sequence(&self, actor_id: u64) -> u64 {
+        let snapshot_seq = self
+            .load_snapshot(actor_id)
+            .map(|s| s.sequence)
+            .unwrap_or(0);
+        let journal_seq = self
+            .read_journal(actor_id)
+            .last()
+            .map(|e| e.sequence)
+            .unwrap_or(0);
+        let wf_event_seq = self
+            .read_workflow_events(actor_id)
+            .last()
+            .map(|e| e.sequence())
+            .unwrap_or(0);
+        let event_seq = self
+            .read_events(actor_id)
+            .last()
+            .map(|e| e.sequence)
+            .unwrap_or(0);
+        snapshot_seq
+            .max(journal_seq)
+            .max(wf_event_seq)
+            .max(event_seq)
+    }
+
+    fn clear(&mut self, actor_id: u64) -> io::Result<()> {
+        for cf_name in [
+            Self::CF_SNAPSHOTS,
+            Self::CF_JOURNAL,
+            Self::CF_WORKFLOW_EVENTS,
+            Self::CF_EVENTS,
+        ] {
+            let cf = self.cf(cf_name)?;
+            // Start from the bare actor prefix.  Snapshot keys are exactly 8
+            // bytes; journal/event keys are 16 bytes (actor || sequence).
+            // Both layouts sort contiguously under the actor prefix.
+            let actor_key = Self::actor_key(actor_id);
+            let mut iter = self.db.iterator_cf(
+                cf,
+                rocksdb::IteratorMode::From(&actor_key, rocksdb::Direction::Forward),
+            );
+            let mut keys = Vec::new();
+            while let Some(Ok((key, _))) = iter.next() {
+                if key.len() < 8 || key[..8] != actor_key {
+                    break;
+                }
+                keys.push(key.to_vec());
+            }
+            for key in keys {
+                self.db
+                    .delete_cf(cf, &key)
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            }
+        }
+        self.db
+            .flush_wal(true)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PostgresStore — production relational persistence backend
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "postgres")]
+pub struct PostgresStore {
+    conn: std::sync::Mutex<postgres::Client>,
+}
+
+#[cfg(feature = "postgres")]
+impl PostgresStore {
+    /// Open a PostgreSQL-backed store using a libpq-style connection string.
+    ///
+    /// Example: `host=localhost user=postgres password=secret dbname=nulang`.
+    /// TLS is disabled (`NoTls`); use a connection string with SSL parameters
+    /// and a TLS-enabled client for production deployments that require it.
+    pub fn new(config: &str) -> io::Result<Self> {
+        let client = postgres::Client::connect(config, postgres::NoTls)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        let store = PostgresStore {
+            conn: std::sync::Mutex::new(client),
+        };
+        store.ensure_tables()?;
+        Ok(store)
+    }
+
+    fn ensure_tables(&self) -> io::Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS snapshots (
+                actor_id BIGINT PRIMARY KEY,
+                sequence BIGINT NOT NULL,
+                activation_epoch BIGINT NOT NULL DEFAULT 1,
+                state TEXT NOT NULL,
+                waiting_signal TEXT,
+                crdt_snapshot TEXT,
+                crdt_field_map TEXT,
+                schema_name TEXT,
+                authority_tokens TEXT
+            )",
+            &[],
+        )
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        conn.execute(
+            "ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS activation_epoch BIGINT NOT NULL DEFAULT 1",
+            &[],
+        )
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        conn.execute(
+            "ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS schema_name TEXT",
+            &[],
+        )
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        conn.execute(
+            "ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS authority_tokens TEXT",
+            &[],
+        )
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS journal (
+                actor_id BIGINT NOT NULL,
+                sequence BIGINT NOT NULL,
+                behavior_id INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                PRIMARY KEY (actor_id, sequence)
+            )",
+            &[],
+        )
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS workflow_events (
+                actor_id BIGINT NOT NULL,
+                sequence BIGINT NOT NULL,
+                event TEXT NOT NULL,
+                PRIMARY KEY (actor_id, sequence)
+            )",
+            &[],
+        )
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS events (
+                actor_id BIGINT NOT NULL,
+                sequence BIGINT NOT NULL,
+                field_name TEXT NOT NULL,
+                event_name TEXT NOT NULL,
+                args TEXT NOT NULL,
+                value TEXT NOT NULL DEFAULT '1',
+                PRIMARY KEY (actor_id, sequence)
+            )",
+            &[],
+        )
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl PersistenceStore for PostgresStore {
+    fn save_snapshot(&mut self, snapshot: ActorSnapshot) -> io::Result<()> {
+        let state_json = serde_json::to_string(&snapshot.state)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let crdt_json = serde_json::to_string(&snapshot.crdt_snapshot)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let crdt_field_map_json = serde_json::to_string(&snapshot.crdt_field_map)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let authority_json = serde_json::to_string(&snapshot.authority_tokens)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let mut conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO snapshots (actor_id, sequence, activation_epoch, state, waiting_signal, crdt_snapshot, crdt_field_map, schema_name, authority_tokens)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             ON CONFLICT (actor_id) DO UPDATE SET
+               sequence = EXCLUDED.sequence,
+               activation_epoch = EXCLUDED.activation_epoch,
+               state = EXCLUDED.state,
+               waiting_signal = EXCLUDED.waiting_signal,
+               crdt_snapshot = EXCLUDED.crdt_snapshot,
+               crdt_field_map = EXCLUDED.crdt_field_map,
+               schema_name = EXCLUDED.schema_name,
+               authority_tokens = EXCLUDED.authority_tokens",
+            &[
+                &(snapshot.actor_id as i64),
+                &(snapshot.sequence as i64),
+                &(snapshot.activation_epoch as i64),
+                &state_json,
+                &snapshot.waiting_signal.as_deref(),
+                &crdt_json.as_str(),
+                &crdt_field_map_json.as_str(),
+                &snapshot.schema_name.as_deref(),
+                &authority_json.as_str(),
+            ],
+        )
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        Ok(())
+    }
+
+    fn load_snapshot(&self, actor_id: u64) -> Option<ActorSnapshot> {
+        let mut conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_one(
+                "SELECT sequence, activation_epoch, state, waiting_signal, crdt_snapshot, crdt_field_map, schema_name, authority_tokens
+                 FROM snapshots WHERE actor_id = $1",
+                &[&(actor_id as i64)],
+            )
+            .ok()?;
+        let sequence: i64 = row.get(0);
+        let activation_epoch: i64 = row.get(1);
+        let state_json: String = row.get(2);
+        let waiting_signal: Option<String> = row.get(3);
+        let crdt_json: Option<String> = row.get(4);
+        let crdt_field_map_json: Option<String> = row.get(5);
+        let schema_name: Option<String> = row.get(6);
+        let authority_json: Option<String> = row.get(7);
+        let crdt_snapshot: Option<Vec<(u64, u8, Vec<u8>)>> =
+            crdt_json.and_then(|j| serde_json::from_str(&j).ok());
+        let crdt_field_map: Option<HashMap<String, u64>> =
+            crdt_field_map_json.and_then(|j| serde_json::from_str(&j).ok());
+        let authority_tokens: BTreeSet<String> = match authority_json {
+            Some(json) => match serde_json::from_str(&json) {
+                Ok(tokens) => tokens,
+                Err(err) => {
+                    warn!(
+                        "nulang-persist: invalid authority metadata for actor {}: {}",
+                        actor_id, err
+                    );
+                    return None;
+                }
+            },
+            None => BTreeSet::new(),
+        };
+        let state: HashMap<String, PersistedValue> = serde_json::from_str(&state_json).ok()?;
+        Some(ActorSnapshot {
+            actor_id,
+            sequence: sequence as u64,
+            activation_epoch: activation_epoch as u64,
+            state,
+            waiting_signal,
+            crdt_snapshot,
+            crdt_field_map,
+            schema_name,
+            authority_tokens,
+        })
+    }
+
+    fn append_journal(&mut self, actor_id: u64, entry: JournalEntry) -> io::Result<()> {
+        let payload_json = serde_json::to_string(&entry.payload)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let mut conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO journal (actor_id, sequence, behavior_id, payload)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (actor_id, sequence) DO UPDATE SET
+               behavior_id = EXCLUDED.behavior_id,
+               payload = EXCLUDED.payload",
+            &[
+                &(actor_id as i64),
+                &(entry.sequence as i64),
+                &(entry.behavior_id as i32),
+                &payload_json,
+            ],
+        )
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        Ok(())
+    }
+
+    fn read_journal(&self, actor_id: u64) -> Vec<JournalEntry> {
+        let mut conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+        let rows = match conn.query(
+            "SELECT sequence, behavior_id, payload FROM journal
+             WHERE actor_id = $1 ORDER BY sequence ASC",
+            &[&(actor_id as i64)],
+        ) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+        rows.iter()
+            .filter_map(|row| {
+                let seq: i64 = row.get(0);
+                let bid: i32 = row.get(1);
+                let payload_json: String = row.get(2);
+                let payload: Vec<PersistedValue> = serde_json::from_str(&payload_json).ok()?;
+                Some(JournalEntry {
+                    sequence: seq as u64,
+                    behavior_id: bid as u16,
+                    payload,
+                })
+            })
+            .collect()
+    }
+
+    fn append_workflow_event(&mut self, actor_id: u64, event: WorkflowEvent) -> io::Result<()> {
+        let event_json = serde_json::to_string(&event)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let mut conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO workflow_events (actor_id, sequence, event)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (actor_id, sequence) DO UPDATE SET
+               event = EXCLUDED.event",
+            &[&(actor_id as i64), &(event.sequence() as i64), &event_json],
+        )
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        Ok(())
+    }
+
+    fn read_workflow_events(&self, actor_id: u64) -> Vec<WorkflowEvent> {
+        let mut conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+        let rows = match conn.query(
+            "SELECT event FROM workflow_events
+             WHERE actor_id = $1 ORDER BY sequence ASC",
+            &[&(actor_id as i64)],
+        ) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+        rows.iter()
+            .filter_map(|row| {
+                let event_json: String = row.get(0);
+                serde_json::from_str(&event_json).ok()
+            })
+            .collect()
+    }
+
+    fn append_event(&mut self, actor_id: u64, entry: EventEntry) -> io::Result<()> {
+        let args_json = serde_json::to_string(&entry.args)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let value_json = serde_json::to_string(&entry.value)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let mut conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO events (actor_id, sequence, field_name, event_name, args, value)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (actor_id, sequence) DO UPDATE SET
+               field_name = EXCLUDED.field_name,
+               event_name = EXCLUDED.event_name,
+               args = EXCLUDED.args,
+               value = EXCLUDED.value",
+            &[
+                &(actor_id as i64),
+                &(entry.sequence as i64),
+                &entry.field_name,
+                &entry.event_name,
+                &args_json,
+                &value_json,
+            ],
+        )
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        Ok(())
+    }
+
+    fn read_events(&self, actor_id: u64) -> Vec<EventEntry> {
+        let mut conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+        let rows = match conn.query(
+            "SELECT sequence, field_name, event_name, args, value FROM events
+             WHERE actor_id = $1 ORDER BY sequence ASC",
+            &[&(actor_id as i64)],
+        ) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+        rows.iter()
+            .filter_map(|row| {
+                let seq: i64 = row.get(0);
+                let field_name: String = row.get(1);
+                let event_name: String = row.get(2);
+                let args_json: String = row.get(3);
+                let args: Vec<PersistedValue> = serde_json::from_str(&args_json).ok()?;
+                let value_json: String = row.get(4);
+                let value: PersistedValue = serde_json::from_str(&value_json).ok()?;
+                Some(EventEntry {
+                    sequence: seq as u64,
+                    field_name,
+                    event_name,
+                    args,
+                    value,
+                })
+            })
+            .collect()
+    }
+
+    fn latest_sequence(&self, actor_id: u64) -> u64 {
+        let mut conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return 0,
+        };
+        let snapshot_seq: Option<i64> = conn
+            .query_opt(
+                "SELECT sequence FROM snapshots WHERE actor_id = $1",
+                &[&(actor_id as i64)],
+            )
+            .ok()
+            .flatten()
+            .map(|row| row.get(0));
+        let journal_seq: Option<i64> = conn
+            .query_opt(
+                "SELECT sequence FROM journal WHERE actor_id = $1 ORDER BY sequence DESC LIMIT 1",
+                &[&(actor_id as i64)],
+            )
+            .ok()
+            .flatten()
+            .map(|row| row.get(0));
+        let wf_event_seq: Option<i64> = conn
+            .query_opt(
+                "SELECT sequence FROM workflow_events WHERE actor_id = $1 ORDER BY sequence DESC LIMIT 1",
+                &[&(actor_id as i64)],
+            )
+            .ok()
+            .flatten()
+            .map(|row| row.get(0));
+        let event_seq: Option<i64> = conn
+            .query_opt(
+                "SELECT sequence FROM events WHERE actor_id = $1 ORDER BY sequence DESC LIMIT 1",
+                &[&(actor_id as i64)],
+            )
+            .ok()
+            .flatten()
+            .map(|row| row.get(0));
+        snapshot_seq
+            .unwrap_or(0)
+            .max(journal_seq.unwrap_or(0))
+            .max(wf_event_seq.unwrap_or(0))
+            .max(event_seq.unwrap_or(0)) as u64
+    }
+
+    fn clear(&mut self, actor_id: u64) -> io::Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        for table in ["snapshots", "journal", "workflow_events", "events"] {
+            conn.execute(
+                &format!("DELETE FROM {} WHERE actor_id = $1", table),
+                &[&(actor_id as i64)],
+            )
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn query(&self, sql: &str, params: &[Value]) -> io::Result<Vec<String>> {
+        let mut conn = self.conn.lock().unwrap();
+        // Preserve Nulang Value types when binding Postgres parameters so
+        // numeric/boolean comparisons work without explicit SQL casts.
+        let typed_params: Vec<Box<dyn postgres::types::ToSql + Sync>> = params
+            .iter()
+            .map(|v| {
+                if let Some(i) = v.as_int() {
+                    Box::new(i) as Box<dyn postgres::types::ToSql + Sync>
+                } else if let Some(f) = v.as_float() {
+                    Box::new(f) as Box<dyn postgres::types::ToSql + Sync>
+                } else if let Some(b) = v.as_bool() {
+                    Box::new(b) as Box<dyn postgres::types::ToSql + Sync>
+                } else {
+                    Box::new(v.to_string_repr()) as Box<dyn postgres::types::ToSql + Sync>
+                }
+            })
+            .collect();
+        let param_refs: Vec<&(dyn postgres::types::ToSql + Sync)> =
+            typed_params.iter().map(|p| p.as_ref()).collect();
+        let rows = conn
+            .query(sql, &param_refs)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        let mut results = Vec::new();
+        for row in &rows {
+            let mut cols: Vec<serde_json::Value> = Vec::with_capacity(row.len());
+            for i in 0..row.len() {
+                let json_val = match row.columns().get(i).map(|c| c.type_().name()) {
+                    Some("bool") => {
+                        let v: bool = row.get(i);
+                        serde_json::Value::Bool(v)
+                    }
+                    Some("int2") | Some("int4") | Some("int8") => {
+                        let v: i64 = row.get(i);
+                        serde_json::value::Number::from_i128(v as i128)
+                            .map(serde_json::Value::Number)
+                            .unwrap_or(serde_json::Value::Null)
+                    }
+                    Some("float4") | Some("float8") => {
+                        let v: f64 = row.get(i);
+                        serde_json::value::Number::from_f64(v)
+                            .map(serde_json::Value::Number)
+                            .unwrap_or(serde_json::Value::Null)
+                    }
+                    _ => {
+                        let v: String = row.get(i);
+                        serde_json::Value::String(v)
+                    }
+                };
+                cols.push(json_val);
+            }
+            let json = serde_json::to_string(&cols)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            results.push(json);
+        }
+        Ok(results)
+    }
+}
 #[cfg(test)]
 mod json_file_store_tests {
     use super::*;
@@ -1303,9 +3239,13 @@ mod json_file_store_tests {
             .save_snapshot(ActorSnapshot {
                 actor_id: 1,
                 sequence: 3,
+                activation_epoch: INITIAL_ACTIVATION_EPOCH,
                 state,
                 waiting_signal: None,
                 crdt_snapshot: None,
+                crdt_field_map: None,
+                schema_name: None,
+                authority_tokens: Default::default(),
             })
             .unwrap();
 
@@ -1363,9 +3303,13 @@ mod json_file_store_tests {
             .save_snapshot(ActorSnapshot {
                 actor_id: 1,
                 sequence: 5,
+                activation_epoch: INITIAL_ACTIVATION_EPOCH,
                 state: HashMap::new(),
                 waiting_signal: None,
                 crdt_snapshot: None,
+                crdt_field_map: None,
+                schema_name: None,
+                authority_tokens: Default::default(),
             })
             .unwrap();
         store
@@ -1390,9 +3334,13 @@ mod json_file_store_tests {
             .save_snapshot(ActorSnapshot {
                 actor_id: 1,
                 sequence: 1,
+                activation_epoch: INITIAL_ACTIVATION_EPOCH,
                 state: HashMap::new(),
                 waiting_signal: None,
                 crdt_snapshot: None,
+                crdt_field_map: None,
+                schema_name: None,
+                authority_tokens: Default::default(),
             })
             .unwrap();
         store
@@ -1424,9 +3372,13 @@ mod json_file_store_tests {
                 .save_snapshot(ActorSnapshot {
                     actor_id: 1,
                     sequence: 1,
+                    activation_epoch: INITIAL_ACTIVATION_EPOCH,
                     state,
                     waiting_signal: None,
                     crdt_snapshot: None,
+                    crdt_field_map: None,
+                    schema_name: None,
+                    authority_tokens: Default::default(),
                 })
                 .unwrap();
             store
@@ -1461,9 +3413,13 @@ mod json_file_store_tests {
             .save_snapshot(ActorSnapshot {
                 actor_id: 1,
                 sequence: 9,
+                activation_epoch: INITIAL_ACTIVATION_EPOCH,
                 state: HashMap::new(),
                 waiting_signal: None,
                 crdt_snapshot: None,
+                crdt_field_map: None,
+                schema_name: None,
+                authority_tokens: Default::default(),
             })
             .unwrap();
 
@@ -1552,5 +3508,901 @@ mod persisted_value_tests {
             !restored.is_nil(),
             "string must survive restore, not become nil"
         );
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "rocksdb")]
+mod rocksdb_store_tests {
+    use super::*;
+
+    fn fresh_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "nulang_rocksdb_test_{}_{}",
+            std::process::id(),
+            tag
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn test_rocksdb_store_save_load_snapshot() {
+        let dir = fresh_dir("snapshot");
+        let mut store = RocksDbStore::new(&dir).unwrap();
+        let mut state = HashMap::new();
+        state.insert("count".to_string(), PersistedValue::Int(42));
+        store
+            .save_snapshot(ActorSnapshot {
+                actor_id: 1,
+                sequence: 3,
+                activation_epoch: INITIAL_ACTIVATION_EPOCH,
+                state,
+                waiting_signal: None,
+                crdt_snapshot: None,
+                crdt_field_map: None,
+                schema_name: None,
+                authority_tokens: Default::default(),
+            })
+            .unwrap();
+
+        let loaded = store.load_snapshot(1).unwrap();
+        assert_eq!(loaded.actor_id, 1);
+        assert_eq!(loaded.sequence, 3);
+        assert_eq!(loaded.state.get("count"), Some(&PersistedValue::Int(42)));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_rocksdb_store_append_read_journal() {
+        let dir = fresh_dir("journal");
+        let mut store = RocksDbStore::new(&dir).unwrap();
+        store
+            .append_journal(
+                1,
+                JournalEntry {
+                    sequence: 1,
+                    behavior_id: 0,
+                    payload: vec![PersistedValue::Int(10)],
+                },
+            )
+            .unwrap();
+        store
+            .append_journal(
+                1,
+                JournalEntry {
+                    sequence: 2,
+                    behavior_id: 1,
+                    payload: vec![PersistedValue::Int(20)],
+                },
+            )
+            .unwrap();
+
+        let journal = store.read_journal(1);
+        assert_eq!(journal.len(), 2);
+        assert_eq!(journal[0].sequence, 1);
+        assert_eq!(journal[1].behavior_id, 1);
+        assert_eq!(journal[1].payload, vec![PersistedValue::Int(20)]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_rocksdb_store_latest_sequence() {
+        let dir = fresh_dir("latest_seq");
+        let mut store = RocksDbStore::new(&dir).unwrap();
+        store
+            .save_snapshot(ActorSnapshot {
+                actor_id: 1,
+                sequence: 5,
+                activation_epoch: INITIAL_ACTIVATION_EPOCH,
+                state: HashMap::new(),
+                waiting_signal: None,
+                crdt_snapshot: None,
+                crdt_field_map: None,
+                schema_name: None,
+                authority_tokens: Default::default(),
+            })
+            .unwrap();
+        store
+            .append_journal(
+                1,
+                JournalEntry {
+                    sequence: 7,
+                    behavior_id: 0,
+                    payload: vec![],
+                },
+            )
+            .unwrap();
+        assert_eq!(store.latest_sequence(1), 7);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_rocksdb_store_clear() {
+        let dir = fresh_dir("clear");
+        let mut store = RocksDbStore::new(&dir).unwrap();
+        store
+            .save_snapshot(ActorSnapshot {
+                actor_id: 1,
+                sequence: 1,
+                activation_epoch: INITIAL_ACTIVATION_EPOCH,
+                state: HashMap::new(),
+                waiting_signal: None,
+                crdt_snapshot: None,
+                crdt_field_map: None,
+                schema_name: None,
+                authority_tokens: Default::default(),
+            })
+            .unwrap();
+        store
+            .append_journal(
+                1,
+                JournalEntry {
+                    sequence: 2,
+                    behavior_id: 0,
+                    payload: vec![],
+                },
+            )
+            .unwrap();
+
+        store.clear(1).unwrap();
+        assert!(store.load_snapshot(1).is_none());
+        assert!(store.read_journal(1).is_empty());
+        assert_eq!(store.latest_sequence(1), 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_rocksdb_store_persists_across_instances() {
+        let dir = fresh_dir("persist");
+        {
+            let mut store = RocksDbStore::new(&dir).unwrap();
+            let mut state = HashMap::new();
+            state.insert("x".to_string(), PersistedValue::Float(1.5));
+            store
+                .save_snapshot(ActorSnapshot {
+                    actor_id: 1,
+                    sequence: 1,
+                    activation_epoch: INITIAL_ACTIVATION_EPOCH,
+                    state,
+                    waiting_signal: None,
+                    crdt_snapshot: None,
+                    crdt_field_map: None,
+                    schema_name: None,
+                    authority_tokens: Default::default(),
+                })
+                .unwrap();
+            store
+                .append_journal(
+                    1,
+                    JournalEntry {
+                        sequence: 2,
+                        behavior_id: 0,
+                        payload: vec![PersistedValue::Bool(true)],
+                    },
+                )
+                .unwrap();
+        }
+
+        {
+            let store = RocksDbStore::new(&dir).unwrap();
+            let snapshot = store.load_snapshot(1).unwrap();
+            assert_eq!(snapshot.sequence, 1);
+            assert_eq!(snapshot.state.get("x"), Some(&PersistedValue::Float(1.5)));
+            let journal = store.read_journal(1);
+            assert_eq!(journal.len(), 1);
+            assert_eq!(journal[0].payload, vec![PersistedValue::Bool(true)]);
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_rocksdb_store_query_unsupported() {
+        let dir = fresh_dir("query");
+        let store = RocksDbStore::new(&dir).unwrap();
+        let res = store.query("SELECT 1", &[]);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err().kind(), io::ErrorKind::Unsupported);
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "postgres")]
+mod postgres_store_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn pg_url() -> Option<String> {
+        std::env::var("NU_TEST_POSTGRES_URL").ok()
+    }
+
+    fn fresh_actor_id() -> u64 {
+        static COUNTER: AtomicU64 = AtomicU64::new(1000);
+        COUNTER.fetch_add(1, Ordering::SeqCst)
+    }
+
+    #[test]
+    fn test_postgres_store_save_load_snapshot() {
+        let url = match pg_url() {
+            Some(u) => u,
+            None => return,
+        };
+        let mut store = PostgresStore::new(&url).unwrap();
+        let actor_id = fresh_actor_id();
+        let mut state = HashMap::new();
+        state.insert("count".to_string(), PersistedValue::Int(42));
+        store
+            .save_snapshot(ActorSnapshot {
+                actor_id,
+                sequence: 3,
+                activation_epoch: INITIAL_ACTIVATION_EPOCH,
+                state,
+                waiting_signal: Some("signal".to_string()),
+                crdt_snapshot: None,
+                crdt_field_map: None,
+                schema_name: None,
+                authority_tokens: Default::default(),
+            })
+            .unwrap();
+
+        let loaded = store.load_snapshot(actor_id).unwrap();
+        assert_eq!(loaded.actor_id, actor_id);
+        assert_eq!(loaded.sequence, 3);
+        assert_eq!(loaded.state.get("count"), Some(&PersistedValue::Int(42)));
+        assert_eq!(loaded.waiting_signal, Some("signal".to_string()));
+        store.clear(actor_id).unwrap();
+    }
+
+    #[test]
+    fn test_postgres_store_append_read_journal() {
+        let url = match pg_url() {
+            Some(u) => u,
+            None => return,
+        };
+        let mut store = PostgresStore::new(&url).unwrap();
+        let actor_id = fresh_actor_id();
+        store
+            .append_journal(
+                actor_id,
+                JournalEntry {
+                    sequence: 1,
+                    behavior_id: 0,
+                    payload: vec![PersistedValue::Int(10)],
+                },
+            )
+            .unwrap();
+        store
+            .append_journal(
+                actor_id,
+                JournalEntry {
+                    sequence: 2,
+                    behavior_id: 1,
+                    payload: vec![PersistedValue::Int(20)],
+                },
+            )
+            .unwrap();
+
+        let journal = store.read_journal(actor_id);
+        assert_eq!(journal.len(), 2);
+        assert_eq!(journal[0].sequence, 1);
+        assert_eq!(journal[1].behavior_id, 1);
+        assert_eq!(journal[1].payload, vec![PersistedValue::Int(20)]);
+        store.clear(actor_id).unwrap();
+    }
+
+    #[test]
+    fn test_postgres_store_latest_sequence() {
+        let url = match pg_url() {
+            Some(u) => u,
+            None => return,
+        };
+        let mut store = PostgresStore::new(&url).unwrap();
+        let actor_id = fresh_actor_id();
+        store
+            .save_snapshot(ActorSnapshot {
+                actor_id,
+                sequence: 5,
+                activation_epoch: INITIAL_ACTIVATION_EPOCH,
+                state: HashMap::new(),
+                waiting_signal: None,
+                crdt_snapshot: None,
+                crdt_field_map: None,
+                schema_name: None,
+                authority_tokens: Default::default(),
+            })
+            .unwrap();
+        store
+            .append_journal(
+                actor_id,
+                JournalEntry {
+                    sequence: 7,
+                    behavior_id: 0,
+                    payload: vec![],
+                },
+            )
+            .unwrap();
+        assert_eq!(store.latest_sequence(actor_id), 7);
+        store.clear(actor_id).unwrap();
+    }
+
+    #[test]
+    fn test_postgres_store_clear() {
+        let url = match pg_url() {
+            Some(u) => u,
+            None => return,
+        };
+        let mut store = PostgresStore::new(&url).unwrap();
+        let actor_id = fresh_actor_id();
+        store
+            .save_snapshot(ActorSnapshot {
+                actor_id,
+                sequence: 1,
+                activation_epoch: INITIAL_ACTIVATION_EPOCH,
+                state: HashMap::new(),
+                waiting_signal: None,
+                crdt_snapshot: None,
+                crdt_field_map: None,
+                schema_name: None,
+                authority_tokens: Default::default(),
+            })
+            .unwrap();
+        store
+            .append_journal(
+                actor_id,
+                JournalEntry {
+                    sequence: 2,
+                    behavior_id: 0,
+                    payload: vec![],
+                },
+            )
+            .unwrap();
+
+        store.clear(actor_id).unwrap();
+        assert!(store.load_snapshot(actor_id).is_none());
+        assert!(store.read_journal(actor_id).is_empty());
+        assert_eq!(store.latest_sequence(actor_id), 0);
+    }
+
+    #[test]
+    fn test_postgres_store_query_typed_params() {
+        let url = match pg_url() {
+            Some(u) => u,
+            None => return,
+        };
+        let store = PostgresStore::new(&url).unwrap();
+        let rows = store
+            .query(
+                "SELECT $1::int8, $2::float8, $3::bool",
+                &[Value::int(42), Value::float(3.14), Value::bool(true)],
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], "[42,3.14,true]");
+    }
+
+    #[test]
+    fn test_postgres_store_workflow_events_and_events() {
+        let url = match pg_url() {
+            Some(u) => u,
+            None => return,
+        };
+        let mut store = PostgresStore::new(&url).unwrap();
+        let actor_id = fresh_actor_id();
+        store
+            .append_workflow_event(
+                actor_id,
+                WorkflowEvent::TimerSet {
+                    sequence: 1,
+                    replay_id: None,
+                    name: "t".to_string(),
+                    duration_ms: 100,
+                },
+            )
+            .unwrap();
+        store
+            .append_event(
+                actor_id,
+                EventEntry {
+                    sequence: 2,
+                    field_name: "counter".to_string(),
+                    event_name: "Inc".to_string(),
+                    args: vec![PersistedValue::Int(1)],
+                    value: PersistedValue::Int(1),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(store.read_workflow_events(actor_id).len(), 1);
+        assert_eq!(store.read_events(actor_id).len(), 1);
+        assert_eq!(store.latest_sequence(actor_id), 2);
+        store.clear(actor_id).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod durable_transition_tests {
+    use super::*;
+
+    fn snapshot(actor_id: u64, sequence: u64, entries: &[(&str, i64)]) -> ActorSnapshot {
+        let mut state = HashMap::new();
+        for (name, value) in entries {
+            state.insert((*name).to_string(), PersistedValue::Int(*value));
+        }
+        ActorSnapshot {
+            actor_id,
+            sequence,
+            state,
+            ..ActorSnapshot::default()
+        }
+    }
+
+    fn transition(actor_id: u64, epoch: u64, sequence: u64) -> DurableTransition {
+        DurableTransition {
+            version: DURABLE_TRANSITION_VERSION,
+            actor_id,
+            activation_epoch: epoch,
+            sequence,
+            expected_previous_sequence: sequence - 1,
+            command: Some(JournalEntry {
+                sequence,
+                behavior_id: 7,
+                payload: vec![PersistedValue::Int(sequence as i64)],
+            }),
+            snapshot: Some(ActorSnapshot {
+                activation_epoch: epoch,
+                ..snapshot(actor_id, sequence, &[("count", sequence as i64)])
+            }),
+            workflow_events: vec![WorkflowEvent::StepCompleted {
+                sequence,
+                activation: Some(WorkflowActivationId::new(actor_id, sequence)),
+                step_name: format!("step-{sequence}"),
+            }],
+            domain_events: vec![EventEntry {
+                sequence,
+                field_name: "count".to_string(),
+                event_name: "Incremented".to_string(),
+                args: vec![],
+                value: PersistedValue::Int(sequence as i64),
+            }],
+            durable_effects: vec![],
+            outbox: vec![DurableOutboxMessage {
+                destination_actor_id: actor_id + 1,
+                ordinal: 0,
+                behavior_id: 9,
+                payload: vec![PersistedValue::Int(sequence as i64)],
+            }],
+        }
+    }
+
+    #[test]
+    fn legacy_timer_set_deserialization_defaults_replay_identity() {
+        let json = r#"{"tag":"TimerSet","value":{"sequence":7,"name":"wake","duration_ms":250}}"#;
+        let event: WorkflowEvent = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            event,
+            WorkflowEvent::TimerSet {
+                sequence: 7,
+                replay_id: None,
+                ref name,
+                duration_ms: 250,
+            } if name == "wake"
+        ));
+
+        let serialized = serde_json::to_string(&event).unwrap();
+        assert!(
+            !serialized.contains("replay_id"),
+            "legacy TimerSet encoding must stay digest-compatible when replay identity is absent"
+        );
+    }
+
+    #[test]
+    fn legacy_terminal_event_serialization_omits_absent_activation() {
+        let event = WorkflowEvent::StepCompleted {
+            sequence: 1,
+            activation: None,
+            step_name: "legacy".to_string(),
+        };
+
+        let encoded = serde_json::to_value(event).unwrap();
+        let value = encoded
+            .get("value")
+            .and_then(serde_json::Value::as_object)
+            .expect("StepCompleted content object");
+
+        assert!(
+            !value.contains_key("activation"),
+            "legacy serialization must not add activation:null and change durable digests"
+        );
+    }
+
+    #[test]
+    fn durable_transition_rejects_terminal_activation_for_wrong_actor() {
+        let mut candidate = transition(10, 1, 1);
+        candidate.workflow_events = vec![WorkflowEvent::StepCompleted {
+            sequence: 1,
+            activation: Some(WorkflowActivationId::new(11, 1)),
+            step_name: "step-1".to_string(),
+        }];
+
+        let error = candidate.digest().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn durable_transition_rejects_terminal_activation_for_wrong_command_sequence() {
+        let mut candidate = transition(10, 1, 1);
+        candidate.workflow_events = vec![WorkflowEvent::StepCompleted {
+            sequence: 1,
+            activation: Some(WorkflowActivationId::new(10, 99)),
+            step_name: "step-1".to_string(),
+        }];
+
+        let error = candidate.digest().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn memory_store_commits_transition_as_one_logical_unit() {
+        let mut store = MemoryStore::new();
+        let committed = store.commit_transition(transition(10, 1, 1)).unwrap();
+
+        assert_eq!(committed.actor_id, 10);
+        assert_eq!(committed.activation_epoch, 1);
+        assert_eq!(committed.sequence, 1);
+        assert_eq!(store.latest_sequence(10), 1);
+        assert_eq!(store.read_journal(10).len(), 1);
+        assert_eq!(store.read_workflow_events(10).len(), 1);
+        assert_eq!(store.read_events(10).len(), 1);
+        assert_eq!(store.load_snapshot(10).unwrap().sequence, 1);
+        assert_eq!(store.committed_transitions(10).len(), 1);
+        assert_eq!(
+            store.durable_tail(10),
+            Some(DurableTail {
+                activation_epoch: 1,
+                sequence: 1,
+                digest: committed.digest,
+            })
+        );
+        assert_eq!(
+            store.load_durable_tail_position(10).unwrap(),
+            Some(DurableTailPosition {
+                activation_epoch: 1,
+                sequence: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn memory_store_rejects_sequence_gap_without_partial_mutation() {
+        let mut store = MemoryStore::new();
+        store.commit_transition(transition(10, 1, 1)).unwrap();
+
+        let mut invalid = transition(10, 1, 3);
+        invalid.expected_previous_sequence = 2;
+        let error = store.commit_transition(invalid).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(store.latest_sequence(10), 1);
+        assert_eq!(store.read_journal(10).len(), 1);
+        assert_eq!(store.read_workflow_events(10).len(), 1);
+        assert_eq!(store.read_events(10).len(), 1);
+        assert_eq!(store.committed_transitions(10).len(), 1);
+    }
+
+    #[test]
+    fn memory_store_first_atomic_transition_continues_legacy_history() {
+        let mut store = MemoryStore::new();
+        store
+            .save_snapshot(snapshot(10, 5, &[("count", 5)]))
+            .unwrap();
+
+        let committed = store.commit_transition(transition(10, 1, 6)).unwrap();
+
+        assert_eq!(committed.sequence, 6);
+        assert_eq!(store.latest_sequence(10), 6);
+        assert_eq!(store.committed_transitions(10).len(), 1);
+    }
+
+    #[test]
+    fn memory_store_rejects_stale_activation_epoch() {
+        let mut store = MemoryStore::new();
+        store.commit_transition(transition(10, 2, 1)).unwrap();
+
+        let mut stale = transition(10, 1, 2);
+        stale.expected_previous_sequence = 1;
+        let error = store.commit_transition(stale).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(store.latest_sequence(10), 1);
+    }
+
+    #[test]
+    fn memory_store_exact_retry_is_idempotent_but_conflict_fails_closed() {
+        let mut store = MemoryStore::new();
+        let original = transition(10, 1, 1);
+        let first = store.commit_transition(original.clone()).unwrap();
+        let retry = store.commit_transition(original).unwrap();
+
+        assert_eq!(first, retry);
+        assert_eq!(store.committed_transitions(10).len(), 1);
+
+        let mut conflict = transition(10, 1, 1);
+        conflict.command.as_mut().unwrap().behavior_id = 99;
+        let error = store.commit_transition(conflict).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(store.committed_transitions(10).len(), 1);
+    }
+
+    #[test]
+    fn transition_digest_is_independent_of_hashmap_insertion_order() {
+        let mut first = transition(10, 1, 1);
+        first.snapshot = Some(snapshot(10, 1, &[("a", 1), ("b", 2), ("c", 3)]));
+
+        let mut second = transition(10, 1, 1);
+        second.snapshot = Some(snapshot(10, 1, &[("c", 3), ("a", 1), ("b", 2)]));
+
+        assert_eq!(first.digest().unwrap(), second.digest().unwrap());
+    }
+
+    #[test]
+    fn transition_rejects_duplicate_outbox_ordinals() {
+        let mut value = transition(10, 1, 1);
+        value.outbox.push(DurableOutboxMessage {
+            destination_actor_id: 12,
+            ordinal: 0,
+            behavior_id: 10,
+            payload: vec![],
+        });
+
+        let error = value.digest().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod libsql_atomic_transition_tests {
+    use super::*;
+
+    fn snapshot(actor_id: u64, sequence: u64, count: i64) -> ActorSnapshot {
+        let mut state = HashMap::new();
+        state.insert("count".to_string(), PersistedValue::Int(count));
+        ActorSnapshot {
+            actor_id,
+            sequence,
+            state,
+            ..ActorSnapshot::default()
+        }
+    }
+
+    fn transition(actor_id: u64, epoch: u64, sequence: u64) -> DurableTransition {
+        DurableTransition {
+            version: DURABLE_TRANSITION_VERSION,
+            actor_id,
+            activation_epoch: epoch,
+            sequence,
+            expected_previous_sequence: sequence - 1,
+            command: Some(JournalEntry {
+                sequence,
+                behavior_id: 3,
+                payload: vec![PersistedValue::Int(sequence as i64)],
+            }),
+            snapshot: Some(ActorSnapshot {
+                activation_epoch: epoch,
+                ..snapshot(actor_id, sequence, sequence as i64)
+            }),
+            workflow_events: vec![
+                WorkflowEvent::StepCompleted {
+                    sequence,
+                    activation: Some(WorkflowActivationId::new(actor_id, sequence)),
+                    step_name: "persist".to_string(),
+                },
+                WorkflowEvent::Custom {
+                    sequence,
+                    replay_id: None,
+                    name: "audit".to_string(),
+                    args: vec![PersistedValue::Int(sequence as i64)],
+                },
+            ],
+            domain_events: vec![
+                EventEntry {
+                    sequence,
+                    field_name: "count".to_string(),
+                    event_name: "Changed".to_string(),
+                    args: vec![],
+                    value: PersistedValue::Int(sequence as i64),
+                },
+                EventEntry {
+                    sequence,
+                    field_name: "mirror".to_string(),
+                    event_name: "Changed".to_string(),
+                    args: vec![],
+                    value: PersistedValue::Int(sequence as i64),
+                },
+            ],
+            durable_effects: vec![],
+            outbox: vec![DurableOutboxMessage {
+                destination_actor_id: actor_id + 1,
+                ordinal: 0,
+                behavior_id: 4,
+                payload: vec![PersistedValue::Int(sequence as i64)],
+            }],
+        }
+    }
+
+    #[test]
+    fn libsql_atomic_transition_commits_all_components() {
+        let mut store = LibsqlStore::in_memory().unwrap();
+        let committed = store.commit_transition(transition(42, 1, 1)).unwrap();
+
+        assert_eq!(committed.sequence, 1);
+        assert_eq!(store.latest_sequence(42), 1);
+        assert_eq!(store.load_snapshot(42).unwrap().sequence, 1);
+        assert_eq!(store.read_journal(42).len(), 1);
+        assert_eq!(store.read_workflow_events(42).len(), 2);
+        assert_eq!(store.read_events(42).len(), 2);
+
+        let outbox = store
+            .query(
+                "SELECT COUNT(*) FROM durable_outbox WHERE actor_id = 42",
+                &[],
+            )
+            .unwrap();
+        assert_eq!(outbox, vec!["[1]".to_string()]);
+    }
+
+    #[test]
+    fn libsql_atomic_transition_retry_is_idempotent() {
+        let mut store = LibsqlStore::in_memory().unwrap();
+        let value = transition(42, 1, 1);
+
+        let first = store.commit_transition(value.clone()).unwrap();
+        let retry = store.commit_transition(value).unwrap();
+
+        assert_eq!(first, retry);
+        let rows = store
+            .query(
+                "SELECT COUNT(*) FROM durable_transitions WHERE actor_id = 42",
+                &[],
+            )
+            .unwrap();
+        assert_eq!(rows, vec!["[1]".to_string()]);
+    }
+
+    #[test]
+    fn libsql_atomic_transition_rejects_gap_without_partial_writes() {
+        let mut store = LibsqlStore::in_memory().unwrap();
+        store.commit_transition(transition(42, 1, 1)).unwrap();
+
+        let mut invalid = transition(42, 1, 3);
+        invalid.expected_previous_sequence = 2;
+        let error = store.commit_transition(invalid).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(store.latest_sequence(42), 1);
+        assert_eq!(store.read_journal(42).len(), 1);
+        assert_eq!(store.read_workflow_events(42).len(), 2);
+        assert_eq!(store.read_events(42).len(), 2);
+    }
+
+    #[test]
+    fn libsql_first_atomic_transition_continues_legacy_history() {
+        let mut store = LibsqlStore::in_memory().unwrap();
+        store.save_snapshot(snapshot(42, 5, 5)).unwrap();
+
+        let committed = store.commit_transition(transition(42, 1, 6)).unwrap();
+
+        assert_eq!(committed.sequence, 6);
+        assert_eq!(store.latest_sequence(42), 6);
+    }
+
+    #[test]
+    fn libsql_atomic_transition_rolls_back_after_mid_commit_failure() {
+        let mut store = LibsqlStore::in_memory().unwrap();
+
+        // Seed a conflicting outbox row for the sequence being committed. The
+        // transaction writes the snapshot, command journal, and staged events
+        // before it reaches the outbox insert, so this forces a real
+        // mid-transaction database failure rather than an up-front validation
+        // error.
+        {
+            let conn = store.conn();
+            store
+                .rt
+                .block_on(async {
+                    conn.execute(
+                        "INSERT INTO durable_outbox
+                         (actor_id, sequence, ordinal, destination_actor_id, behavior_id, payload)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        libsql::params![42_i64, 1_i64, 0_i64, 999_i64, 1_i64, "[]"],
+                    )
+                    .await
+                })
+                .unwrap();
+        }
+
+        let error = store.commit_transition(transition(42, 1, 1)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+
+        // Every write performed by the failed transition must have rolled
+        // back. The deliberately seeded conflicting row remains because it
+        // predates the transaction.
+        assert!(store.load_snapshot(42).is_none());
+        assert!(store.read_journal(42).is_empty());
+        assert!(store.read_workflow_events(42).is_empty());
+        assert!(store.read_events(42).is_empty());
+        assert_eq!(store.latest_sequence(42), 0);
+
+        let transitions = store
+            .query(
+                "SELECT COUNT(*) FROM durable_transitions WHERE actor_id = 42",
+                &[],
+            )
+            .unwrap();
+        let tails = store
+            .query(
+                "SELECT COUNT(*) FROM durable_tails WHERE actor_id = 42",
+                &[],
+            )
+            .unwrap();
+        assert_eq!(transitions, vec!["[0]".to_string()]);
+        assert_eq!(tails, vec!["[0]".to_string()]);
+    }
+
+    #[test]
+    fn libsql_atomic_transition_survives_reopen() {
+        let path = std::env::temp_dir().join(format!(
+            "nulang_atomic_transition_{}_reopen.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+
+        {
+            let mut store = LibsqlStore::new(&path).unwrap();
+            store.commit_transition(transition(77, 4, 1)).unwrap();
+        }
+
+        {
+            let store = LibsqlStore::new(&path).unwrap();
+            assert_eq!(store.latest_sequence(77), 1);
+            assert_eq!(store.load_snapshot(77).unwrap().sequence, 1);
+            assert_eq!(store.read_journal(77).len(), 1);
+            assert_eq!(store.read_workflow_events(77).len(), 2);
+            assert_eq!(store.read_events(77).len(), 2);
+
+            let rows = store
+                .query(
+                    "SELECT activation_epoch, sequence
+                     FROM durable_tails WHERE actor_id = 77",
+                    &[],
+                )
+                .unwrap();
+            assert_eq!(rows, vec!["[4,1]".to_string()]);
+            assert_eq!(
+                store.load_durable_tail_position(77).unwrap(),
+                Some(DurableTailPosition {
+                    activation_epoch: 4,
+                    sequence: 1,
+                })
+            );
+        }
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn libsql_atomic_transition_rejects_stale_epoch() {
+        let mut store = LibsqlStore::in_memory().unwrap();
+        store.commit_transition(transition(42, 2, 1)).unwrap();
+
+        let error = store.commit_transition(transition(42, 1, 2)).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(store.latest_sequence(42), 1);
     }
 }
