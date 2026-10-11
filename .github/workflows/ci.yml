@@ -99,23 +99,6 @@ jobs:
       - name: Build
         run: cargo build --locked --all-targets
 
-      # This validates the actual emitted Linux ELF before the full nextest
-      # suite and records size/linkage metadata without conflating static Go
-      # runtime binaries with libc-linked Nulang/C artifacts.
-      - name: Native executable smoke and size report
-        run: |
-          python3 scripts/measure_native_binary_size.py \
-            --nulang /tmp/cargo-target/debug/nulang \
-            --json-out native-binary-size.json
-
-      - name: Upload native executable size report
-        uses: actions/upload-artifact@v7
-        with:
-          name: native-elf-size-${{ github.sha }}
-          path: native-binary-size.json
-          if-no-files-found: error
-          retention-days: 7
-
       - name: Test
         # nextest isolates individual tests in their own processes and schedules
         # test binaries concurrently, reducing wall-clock time without changing
@@ -263,7 +246,20 @@ jobs:
         run: |
           cargo_target="$(cargo metadata --locked --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
           bash scripts/measure_native_binaries.sh "$cargo_target/debug/nulang" "$cargo_target/native-size-smoke"
+          python3 scripts/measure_native_binary_size.py \
+            --nulang "$cargo_target/debug/nulang" \
+            --json-out native-binary-size.json
+          cp "$cargo_target/native-size-smoke/report.tsv" native-size-report.tsv
 
+      - name: Upload native executable size report
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-elf-size-${{ github.sha }}
+          path: |
+            native-binary-size.json
+            native-size-report.tsv
+          if-no-files-found: error
+          retention-days: 7
       - name: Smoke test standalone Savina runner
         run: |
           output="$(cargo run --locked --no-default-features --features savina-bench --bin nulang-savina -- --benchmark ping_pong --format jsonl)"
