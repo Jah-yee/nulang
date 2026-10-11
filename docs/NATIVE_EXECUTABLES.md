@@ -30,7 +30,8 @@ Supported in this prototype:
 - A synthetic `__main` (or `main`) entry with no parameters, a single basic
   block, no handlers, and a Unit result.
 - UTF-8 string constants, integer constants, local copies, negation, and
-  integer addition/subtraction/multiplication.
+  integer addition/subtraction/multiplication. Straight-line integer expressions
+  are folded at compile time with the VM's signed **48-bit wraparound** semantics.
 - `perform IO.print(string)` and `IO.println(string)`, implemented through
   host `puts`, including their terminating newline.
 
