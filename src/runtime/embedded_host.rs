@@ -219,6 +219,31 @@ mod tests {
     }
 
     #[test]
+    fn embedded_host_reports_mailbox_backpressure_instead_of_silent_success() {
+        let mut host = EmbeddedActorHost::new(1);
+        let actor_id = host.spawn(vec![("count".to_string(), 0)]).unwrap();
+        host.register_behavior(actor_id, "add", add_to_counter).unwrap();
+        host.runtime
+            .as_mut()
+            .unwrap()
+            .actors
+            .get_mut(&actor_id)
+            .unwrap()
+            .mailbox
+            .reset(1);
+
+        assert_eq!(host.send_int(actor_id, "add", &[2]), Ok(()));
+        assert_eq!(
+            host.send_int(actor_id, "add", &[100]),
+            Err(HostError::MailboxFull),
+            "a rejected message must never be reported as admitted"
+        );
+        assert_eq!(host.poll(1), Ok(1));
+        assert_eq!(host.get_int_field(actor_id, "count"), Ok(Some(2)));
+        assert_eq!(host.poll(1), Ok(0));
+    }
+
+    #[test]
     fn embedded_host_rejects_duplicate_behavior_registration() {
         let mut host = EmbeddedActorHost::new(1);
         let actor = host.spawn(vec![]).unwrap();
