@@ -243,9 +243,9 @@ fn compose_subst(s2: &Substitution, s1: &Substitution) -> Substitution {
 // Unification (Most General Unifier)
 // ---------------------------------------------------------------------------
 
-/// Check if two effect rows are compatible (can be unified).
-/// For closed rows, they must have exactly the same effects.
-/// For open rows, we check that the fixed effects are compatible.
+/// Check when two effect rows can be equated without a row substitution.
+/// Unlike directional assignment, an unresolved open tail is never known to
+/// equal a closed effect set. Application-scoped solving must supply the proof.
 fn effect_row_compatible(e1: &EffectRow, e2: &EffectRow) -> bool {
     match (e1, e2) {
         (EffectRow::Closed(a), EffectRow::Closed(b)) => {
@@ -255,8 +255,8 @@ fn effect_row_compatible(e1: &EffectRow, e2: &EffectRow) -> bool {
             b_sorted.sort();
             a_sorted == b_sorted
         }
-        (EffectRow::Open(a, _), EffectRow::Closed(b))
-        | (EffectRow::Closed(b), EffectRow::Open(a, _)) => b.iter().all(|e| a.contains(e)),
+        (EffectRow::Open(_, _), EffectRow::Closed(_))
+        | (EffectRow::Closed(_), EffectRow::Open(_, _)) => false,
         (EffectRow::Open(a, r1), EffectRow::Open(b, r2)) => {
             // Matching explicit effects are not enough: unrelated tails
             // cannot be equated without carrying a row substitution. Until
@@ -508,8 +508,10 @@ fn mgu_assignable(found: &Type, expected: &Type, span: Span) -> NuResult<Substit
     // satisfy a closed pure contract.
     if let (
         Type::Function {
+            param,
+            ret,
             effect: found_effect,
-            ..
+            cap,
         },
         Type::Function {
             effect: expected_effect,
@@ -524,6 +526,17 @@ fn mgu_assignable(found: &Type, expected: &Type, span: Span) -> NuResult<Substit
                 span,
             ));
         }
+        // Directional inclusion is established only for the outer callback
+        // effect row. Keep its actual parameter/return/capability types and
+        // delegate all nested comparisons to strict symmetric unification.
+        // Otherwise unknown inner callback effects could be erased.
+        let adapted = Type::Function {
+            param: param.clone(),
+            ret: ret.clone(),
+            effect: expected_effect.clone(),
+            cap: *cap,
+        };
+        return mgu(&adapted, expected, span);
     }
     mgu(found, expected, span)
 }
