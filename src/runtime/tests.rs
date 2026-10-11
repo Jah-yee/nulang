@@ -525,6 +525,62 @@ fn test_actor_set_priority_changes_scheduling() {
 }
 
 #[test]
+fn test_lifo_handoff_slot_does_not_preempt_queued_high_priority() {
+    // LIFO handoff parks a receiver in `next_run_slot`. Strict priority must
+    // still hold for queued work: a parked Normal actor may not preempt a
+    // High actor enqueued from a non-handoff source (spawn/timer/network).
+    // The claim must take the queued High actor and leave the slot parked.
+    let mut rt = Runtime::new();
+    let a = rt.spawn_actor(Box::new(|| vec![]));
+    let b = rt.spawn_actor(Box::new(|| vec![]));
+    let c = rt.spawn_actor(Box::new(|| vec![]));
+    declare_test_behavior(&mut rt, a, "noop");
+    declare_test_behavior(&mut rt, b, "noop");
+    declare_test_behavior(&mut rt, c, "noop");
+
+    // Drain the spawn-time Normal-priority tokens.
+    let mut drained = std::collections::HashSet::new();
+    for _ in 0..3 {
+        let id = rt.claim_next_ready_actor().expect("spawned actor token");
+        rt.finish_actor_turn(id);
+        drained.insert(id);
+    }
+    assert_eq!(drained, [a, b, c].into_iter().collect());
+
+    // Boost c to High via the builtin-effect path.
+    assert_eq!(
+        rt.perform_actor_builtin(Some(c), Some("set_priority"), &[], &[Value::int(0)]),
+        Some(Value::nil())
+    );
+
+    // Park b (Normal) in the LIFO slot, then enqueue c (High) normally.
+    rt.enqueue_actor_handoff(b);
+    assert_eq!(rt.next_run_slot, Some(b), "handoff should park b");
+    rt.enqueue_actor(c);
+
+    // The claim must fire the priority gate: dequeued High c, slot untouched.
+    assert_eq!(
+        rt.claim_next_ready_actor(),
+        Some(c),
+        "queued High must run before parked Normal"
+    );
+    assert_eq!(
+        rt.next_run_slot,
+        Some(b),
+        "gate must preserve the parked slot while High work is queued"
+    );
+    rt.finish_actor_turn(c);
+
+    // With the High queue drained, the parked Normal slot is claimable.
+    assert_eq!(
+        rt.claim_next_ready_actor(),
+        Some(b),
+        "parked Normal runs once no higher priority work is queued"
+    );
+    rt.finish_actor_turn(b);
+}
+
+#[test]
 fn test_anonymous_actor_accepts_untyped_mailbox_delivery_without_handler_alias() {
     let mut rt = Runtime::new();
     let actor_id = rt.spawn_actor(Box::new(|| vec![]));
@@ -5084,36 +5140,68 @@ fn pump_until_addresses_converge(
     }
 }
 
-/// Pump one runtime until its transport has a live connection registered for
-/// `peer`, or fail with connection diagnostics.
+/// Pump two runtimes until a real packet/ACK roundtrip succeeds.
 ///
-/// Membership and authoritative-address convergence happen on the runtime
-/// thread, while the TCP sender establishes connections asynchronously. A
-/// recovered cluster is not yet ready for a one-shot delivery assertion until
-/// the sender-side transport has completed that reconnect.
+/// A connection-map entry alone is not a readiness proof after a partition:
+/// it can briefly describe a stale TCP stream that has not observed EOF yet.
+/// Before a one-shot post-heal actor send, require a tracked heartbeat ACK from
+/// the intended peer so the test proves bidirectional transport readiness.
 #[cfg(feature = "tcp")]
-fn pump_until_peer_connected(rt: &mut Runtime, peer: NodeId, timeout: Duration) {
+fn pump_until_peer_roundtrip(sender: &mut Runtime, peer: &mut Runtime, timeout: Duration) {
     let deadline = Instant::now() + timeout;
+    let sender_id = sender.distributed.node_id.expect("sender node id");
+    let peer_id = peer.distributed.node_id.expect("peer node id");
+    let peer_addr = sender
+        .distributed
+        .cluster
+        .as_ref()
+        .and_then(|cluster| cluster.get_node(peer_id))
+        .map(|info| info.address)
+        .expect("peer must exist in sender membership");
+    let mut probe_sequences = Vec::new();
+
     loop {
-        rt.process_network();
-        let connected_addr = rt
-            .distributed
-            .transport
-            .as_ref()
-            .and_then(|transport| transport.connection_addr(peer));
-        if connected_addr.is_some() {
+        peer.process_network();
+        sender.process_network();
+
+        if probe_sequences.iter().any(|seq| sender.is_acked(*seq)) {
             return;
         }
+
+        match sender
+            .distributed
+            .transport
+            .as_mut()
+            .expect("sender transport")
+            .send_tracked(
+                peer_id,
+                peer_addr,
+                Packet::Heartbeat {
+                    node_id: sender_id,
+                    timestamp: 0,
+                },
+            ) {
+            TrackedSendOutcome::Sent(seq) => probe_sequences.push(seq),
+            TrackedSendOutcome::Unsupported => {
+                panic!("TCP readiness probe unexpectedly lacks tracked-send support")
+            }
+            TrackedSendOutcome::Rejected => {
+                panic!("TCP readiness probe heartbeat was rejected before send")
+            }
+        }
+
         assert!(
             Instant::now() < deadline,
-            "transport did not reconnect to peer {:?} within the timeout; local={:?}, cluster_addr={:?}",
-            peer,
-            rt.distributed.node_id,
-            rt.distributed
+            "transport did not complete a heartbeat/ACK roundtrip to peer {:?}; local={:?}, cluster_addr={:?}, probes={}",
+            peer_id,
+            sender.distributed.node_id,
+            sender
+                .distributed
                 .cluster
                 .as_ref()
-                .and_then(|cluster| cluster.get_node(peer))
+                .and_then(|cluster| cluster.get_node(peer_id))
                 .map(|info| info.address),
+            probe_sequences.len(),
         );
         sleep(Duration::from_millis(50));
     }
@@ -5598,7 +5686,7 @@ fn test_three_node_cluster_split_brain_detects_and_heals() {
         &expected_addresses,
         Duration::from_secs(15),
     );
-    pump_until_peer_connected(&mut rt_c, node_a, Duration::from_secs(15));
+    pump_until_peer_roundtrip(&mut rt_c, &mut rt_a, Duration::from_secs(15));
 
     // Prove the healed cluster does real cross-boundary work: C sends a
     // remote message to an actor on A, across the former partition line.
@@ -5896,7 +5984,10 @@ fn test_five_node_cluster_split_brain_detects_and_heals() {
         &expected_addresses,
         Duration::from_secs(15),
     );
-    pump_until_peer_connected(&mut nodes[4], ids[0], Duration::from_secs(15));
+    {
+        let (first_four, last) = nodes.split_at_mut(4);
+        pump_until_peer_roundtrip(&mut last[0], &mut first_four[0], Duration::from_secs(15));
+    }
 
     // Cross-boundary delivery after healing: E (node 4) -> actor on A
     // (node 0).
@@ -8573,5 +8664,49 @@ fn workflow_timer_rearm_rejects_missing_handler_without_aliasing_behavior_zero()
     assert!(
         rt.timer_wheel.is_empty(),
         "missing __timer_fired must not alias behavior zero",
+    );
+}
+
+#[test]
+fn confirmed_node_removal_forgets_crdt_receiver_knowledge() {
+    let mut rt = Runtime::new();
+    let peer = NodeId(42);
+
+    let mut source = CrdtManager::new(1);
+    let id = source.create_gcounter().0;
+    source.get_gcounter_mut(id).unwrap().increment_by(1);
+
+    let initial = rt
+        .crdt_peer_frontiers
+        .generate(&source, peer.0)
+        .expect("new peer needs initial state");
+    assert!(rt.crdt_peer_frontiers.acknowledge(peer.0, initial.batch_id));
+    assert_eq!(rt.crdt_peer_frontiers.acknowledged_entry_count(peer.0), 1);
+
+    // A transport correlation for the departed peer must not survive either.
+    rt.pending_crdt_sync_acks
+        .insert(99, (peer.0, initial.batch_id));
+
+    super::distribution::handle_node_removed(&mut rt, peer);
+
+    assert_eq!(
+        rt.crdt_peer_frontiers.acknowledged_entry_count(peer.0),
+        0,
+        "confirmed removal must discard stale receiver knowledge"
+    );
+    assert!(
+        rt.pending_crdt_sync_acks
+            .values()
+            .all(|(pending_peer, _)| *pending_peer != peer.0),
+        "confirmed removal must discard stale packet-to-batch correlations"
+    );
+
+    let rejoin = rt
+        .crdt_peer_frontiers
+        .generate(&source, peer.0)
+        .expect("a removed peer must require a fresh join batch");
+    assert!(
+        rejoin.ops.iter().all(|op| !op.is_delta),
+        "a peer that rejoins after confirmed removal must receive full state"
     );
 }
