@@ -2977,6 +2977,31 @@ mod tests {
     }
 
     #[test]
+    fn test_closed_effect_policy_rejects_unresolved_direct_callee() {
+        // A declared function can carry unknown effects through its row tail.
+        // Checking the call site must not discard that uncertainty when the
+        // enclosing function declares a closed authority allowance.
+        let mut checker = EffectChecker::new();
+        checker.fn_rows.insert(
+            "unknown_effects".to_string(),
+            EffectRow::Open(vec![Effect::IO], Region::fresh()),
+        );
+
+        let call = Expr::App {
+            func: Box::new(Expr::Var("unknown_effects".to_string(), s())),
+            args: vec![],
+            span: s(),
+        };
+        let allowed = EffectRow::Closed(vec![Effect::IO]);
+        let result = checker.check_effects(&EffectContext::empty(), &call, &allowed);
+
+        assert!(
+            matches!(result, Err(NuError::EffectError { .. })),
+            "unknown transitive effects must not satisfy a closed authority boundary"
+        );
+    }
+
+    #[test]
     fn test_effect_row_union() {
         let a = EffectRow::Closed(vec![Effect::IO]);
         let b = EffectRow::Closed(vec![Effect::FS]);
