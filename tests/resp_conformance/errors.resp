@@ -1,0 +1,33 @@
+# Error-family conformance (error-prefix policy): compare reply shape
+# (error vs ok) and the first token after '-' only; message prose is
+# not byte-pinned to Redis.
+*3
+$3
+SET
+$3
+str
+$5
+hello
+
+*2
+$4
+INCR
+$3
+str
+
+*1
+$3
+GET
+
+*3
+$3
+GET
+$1
+x
+$1
+y
+
+*1
+$6
+FOOBAR
+

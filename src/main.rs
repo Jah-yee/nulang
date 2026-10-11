@@ -308,6 +308,24 @@ fn main() {
             }
             "--lsp" => opts.lsp = true,
             "--dap" => opts.dap = true,
+            #[cfg(feature = "cache-server")]
+            "--cache-server" => opts.cache_server = true,
+            #[cfg(feature = "cache-server")]
+            "--cache-port" => {
+                if i + 1 < args.len() {
+                    match args[i + 1].parse::<u16>() {
+                        Ok(port) => opts.cache_port = port,
+                        Err(_) => {
+                            eprintln!("Error: --cache-port requires a valid port number");
+                            std::process::exit(1);
+                        }
+                    }
+                    i += 1;
+                } else {
+                    eprintln!("Error: --cache-port requires a port number");
+                    std::process::exit(1);
+                }
+            }
             "--doc" => opts.doc = true,
             "--backend" => {
                 if i + 1 < args.len() {
@@ -646,6 +664,78 @@ fn main() {
             std::process::exit(1);
         }
     }
+    #[cfg(feature = "cache-server")]
+    if opts.cache_server {
+        use nulang::runtime::cache::CacheStore;
+        use nulang::runtime::cache_cluster::{CacheAdvertisedEndpoint, CacheEndpointMap};
+        use nulang::runtime::cache_dispatch::{CacheDispatchChannels, CacheDispatcher};
+        use nulang::runtime::cache_routing::CacheSlotMap;
+        use nulang::runtime::cache_server::{CacheServerClock, CacheServerConfig, CacheShardServer};
+
+        let port = opts.cache_port;
+        let placement = match CacheSlotMap::new_local(1, 1) {
+            Ok(map) => map,
+            Err(e) => {
+                eprintln!("Error: cache placement: {e:?}");
+                std::process::exit(1);
+            }
+        };
+        let owner = match placement.owner_for_slot(0) {
+            Some(owner) => owner,
+            None => {
+                eprintln!("Error: cache placement has no slot owner");
+                std::process::exit(1);
+            }
+        };
+        let (channels, mut inboxes) = match CacheDispatchChannels::new(1, 32) {
+            Ok(channels) => channels,
+            Err(e) => {
+                eprintln!("Error: cache dispatch channels: {e:?}");
+                std::process::exit(1);
+            }
+        };
+        let mut endpoints = CacheEndpointMap::new();
+        endpoints.insert(owner, CacheAdvertisedEndpoint::new("127.0.0.1", port));
+        let dispatcher = match CacheDispatcher::new(1, 0, placement, channels)
+            .map(|channels| channels.with_cluster_redirects(endpoints))
+        {
+            Ok(dispatcher) => dispatcher,
+            Err(e) => {
+                eprintln!("Error: cache dispatcher: {e:?}");
+                std::process::exit(1);
+            }
+        };
+        let bind: std::net::SocketAddr = format!("127.0.0.1:{port}")
+            .parse()
+            .expect("valid bind address");
+        let mut server = match CacheShardServer::bind(
+            bind,
+            dispatcher,
+            inboxes.remove(0),
+            CacheStore::new(),
+            CacheServerConfig::default(),
+            CacheServerClock::new(),
+        ) {
+            Ok(server) => server,
+            Err(e) => {
+                eprintln!("Error: cache server bind {bind}: {e:?}");
+                std::process::exit(1);
+            }
+        };
+        eprintln!("cache-server: listening on {bind} (mode=redirect)");
+        std::thread::spawn(move || {
+            if let Err(e) = server.run() {
+                eprintln!("cache-server: fatal: {e:?}");
+                std::process::exit(1);
+            }
+        });
+        // Without the cache-server feature, --cache-server never parses
+        // (unknown-option error), so control only reaches here when serving.
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
+
     if opts.dap {
         nulang::dap::run_dap_server();
         return;
@@ -1079,6 +1169,14 @@ struct Options {
     store_path: Option<String>,
     /// Escalate warnings (e.g. RFC 0015 deprecations) to a hard error.
     deny_warnings: bool,
+    /// Serve the RESP cache tier (`--cache-server`); requires the
+    /// `cache-server` feature.
+    #[cfg(feature = "cache-server")]
+    cache_server: bool,
+    /// Port for `--cache-server`; deliberately non-6379 so a real redis can
+    /// coexist for differential conformance.
+    #[cfg(feature = "cache-server")]
+    cache_port: u16,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -1115,6 +1213,10 @@ impl Default for Options {
             target: "native".to_string(),
             store_path: None,
             deny_warnings: false,
+            #[cfg(feature = "cache-server")]
+            cache_server: false,
+            #[cfg(feature = "cache-server")]
+            cache_port: 17_390,
         }
     }
 }

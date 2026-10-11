@@ -182,3 +182,58 @@ must be measured separately from steady-state command execution.
 6. Expand RESP compatibility and add Nulang-native leases, locks, semaphores,
    fencing tokens, queues, and stored functions where they fit the product
    boundary.
+
+## Borrowed ideas and explicit declines (from a frankenredis review)
+
+RESP compatibility is an ingress contract, not an instruction to model keys,
+values, or commands as Redis. The tier borrows portable, high-value ideas from
+`Dicklesworthstone/frankenredis`; full-Redis-parity machinery is declined with
+recorded reasons.
+
+**Borrowed (implemented):**
+- RESP parse-layer bound enforcement: `parse_bulk` and `parse_command` reject
+  declared lengths above `MAX_BULK_LEN` (1 MiB, shadowing the server's
+  `max_input_buffer` default) and argc above `MAX_ARGS`, so over-cap frames
+  error immediately instead of stalling the connection. Error bodies are
+  CRLF-sanitized (`\r`/`\n` escaped) so client-controlled command names cannot
+  break a RESP frame.
+- A differential conformance harness (`scripts/redis_conformance.sh` + driver,
+  fixtures under `tests/resp_conformance/`) that replays fixture commands
+  against a real `redis-server` oracle and diffs replies per family policy
+  (byte-exact, ttl-range ±2s, error-prefix). The harness is the natural
+  verifier of an ingress contract: expected replies come from the real server,
+  so fixture drift is self-correcting. Degrades to a skip (exit 2) when
+  `redis-server` is absent; never weakens fixture policies to force a pass.
+- A deterministic RESP-parser fuzz test (`test_resp_parser_fuzz_deterministic`)
+  driven by the crate's splitmix64 DST generator: random and structured-mutant
+  frames must parse without panicking, hanging, or stalling.
+- Unsafe fencing: all RESP/cache modules (`resp`, `resp_cache`, `cache`,
+  `cache_routing`, `cache_pipeline`, `cache_dispatch`, `cache_cluster`,
+  `cache_server`) carry `#![forbid(unsafe_code)]`.
+
+**Declined (evidence-backed):**
+- Sentinel FSM, PSYNC replication, RDB v11, manifest AOF: Nulang already has
+  supervisors/links/`SupervisorAction`, and NUL0 distribution +
+  `PersistenceStore` cover distributed state. This tier's durability classes
+  are Nulang-native (memory / async journal / journal / replica / quorum ACK),
+  not Redis formats; Redis formats matter only for real-Redis interop, which
+  this architecture explicitly does not target.
+- Lua scripting, ACLs, the full 242-command surface, the upstream Tcl-suite
+  gate, and a strict-vs-hardened mode split: these exist only to serve
+  byte-exact parity. The ingress-contract/migration-surface boundary (FABRIC)
+  means there is no parity goal for them to serve; a hardened mode has no
+  target without that parity goal.
+- Threat-event ledger: no incident-forensics requirement; actor journaling is
+  the closest analogue.
+- 15-crate boundaries: single crate; the existing `resp`/`cache`/`cache_server`
+  modules already separate codec/store/server.
+- A/A benchmark null control: redundant — `scripts/confirm_bench_regression.py`
+  already alternates base/candidate on one logical CPU with a bootstrap-95% CI
+  above 1.0, subsuming frankenredis's A/A noise bound. The tier's own perf-gates
+  list above is the existing roadmap.
+- RESP3/downconversion: the server is RESP2-native by design; no RESP3
+  negotiation exists to serve.
+
+**Contingency**: if drop-in parity is later wanted, the flip is additive and
+does not undo the borrows: resurrect the strict/hardened split + Tcl-suite
+gate and treat the conformance harness as the hard byte-exact gate.

@@ -5,6 +5,19 @@
 //! lazy iterator, so common commands such as GET/SET do not allocate a Vec of
 //! argument objects before routing to the shard-local cache kernel.
 
+#![forbid(unsafe_code)]
+
+/// Maximum accepted bulk-string length, mirroring the server's
+/// `max_input_buffer` default so an over-declared frame errors immediately
+/// instead of stalling the connection until the buffer cap. MUST shadow
+/// `CacheServerConfig::max_input_buffer`.
+pub const MAX_BULK_LEN: usize = 1 << 20;
+
+/// Maximum accepted command argc (number of array elements). Any larger count
+/// is unsatisfiable within a 1 MiB buffer, so it would otherwise stall the
+/// connection waiting for bytes that can never arrive.
+pub const MAX_ARGS: usize = 65_536;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RespParseError {
     ExpectedArray,
@@ -13,6 +26,7 @@ pub enum RespParseError {
     InvalidLength,
     InvalidTerminator,
     EmptyCommand,
+    LengthExceeded,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +104,9 @@ pub fn parse_command(input: &[u8]) -> Result<Option<(RespCommand<'_>, usize)>, R
         return Err(RespParseError::EmptyCommand);
     }
     let count = count as usize;
+    if count > MAX_ARGS {
+        return Err(RespParseError::LengthExceeded);
+    }
 
     let Some((name, consumed)) = parse_bulk(&input[cursor..])? else {
         return Ok(None);
@@ -130,6 +147,9 @@ fn parse_bulk(input: &[u8]) -> Result<Option<(&[u8], usize)>, RespParseError> {
     }
 
     let len = len as usize;
+    if len > MAX_BULK_LEN {
+        return Err(RespParseError::LengthExceeded);
+    }
     let end = header
         .checked_add(len)
         .ok_or(RespParseError::InvalidLength)?;
@@ -200,7 +220,13 @@ pub fn write_simple(out: &mut Vec<u8>, value: &[u8]) {
 
 pub fn write_error(out: &mut Vec<u8>, value: &[u8]) {
     out.push(b'-');
-    out.extend_from_slice(value);
+    for &byte in value {
+        match byte {
+            b'\r' => out.extend_from_slice(b"\\r"),
+            b'\n' => out.extend_from_slice(b"\\n"),
+            _ => out.push(byte),
+        }
+    }
     out.extend_from_slice(b"\r\n");
 }
 
@@ -361,5 +387,94 @@ mod tests {
         out.clear();
         write_moved(&mut out, 3999, b"127.0.0.1:6381");
         assert_eq!(out, b"-MOVED 3999 127.0.0.1:6381\r\n");
+    }
+
+    #[test]
+    fn test_bulk_length_cap() {
+        // Exactly MAX_BULK_LEN declared but absent payload must request more
+        // bytes (legal), one past the cap must error immediately.
+        let mut at_cap = Vec::new();
+        at_cap.extend_from_slice(format!("*1\r\n${MAX_BULK_LEN}\r\n").as_bytes());
+        assert!(parse_command(&at_cap).unwrap().is_none());
+
+        let over_cap = format!("*1\r\n${}\r\n", MAX_BULK_LEN + 1);
+        assert_eq!(
+            parse_command(over_cap.as_bytes()),
+            Err(RespParseError::LengthExceeded)
+        );
+    }
+
+    #[test]
+    fn test_argc_cap() {
+        let over_cap = format!("*{}\r\n", MAX_ARGS + 1);
+        assert_eq!(
+            parse_command(over_cap.as_bytes()),
+            Err(RespParseError::LengthExceeded)
+        );
+    }
+
+    #[test]
+    fn test_write_error_sanitizes_crlf() {
+        let mut out = Vec::new();
+        write_error(&mut out, b"ERR a\r\nb");
+        // No raw CR or LF inside the body; escaped forms survive, terminator
+        // stays a single CRLF.
+        assert_eq!(out, b"-ERR a\\r\\nb\r\n");
+        assert!(!out[..out.len() - 2].contains(&b'\r'));
+        assert!(!out[..out.len() - 2].contains(&b'\n'));
+        assert_eq!(&out[out.len() - 2..], b"\r\n");
+    }
+
+    #[test]
+    fn test_resp_parser_fuzz_deterministic() {
+        // Reuse the crate's splitmix64 DST generator: same seed, same bytes.
+        use crate::dst::DeterministicRng;
+        let mut rng = DeterministicRng::new(0x5eed_f00d_cafe_1234);
+
+        // (a) uniform random bytes, length 0..512: parse must never panic and
+        // never loop (a bounded pure function; the caller decides to wait).
+        for _ in 0..5_000 {
+            let len = (rng.next() % 513) as usize;
+            let mut buf = vec![0u8; len];
+            for b in buf.iter_mut() {
+                *b = (rng.next() & 0xff) as u8;
+            }
+            match parse_command(&buf) {
+                Ok(_) | Err(_) => {}
+            }
+        }
+
+        // (b) structured mutations of a valid frame: truncate, append garbage,
+        // and over-cap declared lengths. The caps must translate to Err
+        // (never Ok(None), which would stall the caller waiting for bytes that
+        // can never arrive within the 1 MiB buffer).
+        let valid = b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n";
+        for i in 0..5_000 {
+            let mut buf = valid.to_vec();
+            match i % 4 {
+                0 => buf.truncate((rng.next() as usize) % (buf.len() + 1)),
+                1 => {
+                    let extra = (rng.next() % 32) as usize;
+                    for _ in 0..extra {
+                        buf.push((rng.next() & 0xff) as u8);
+                    }
+                }
+                2 => buf = b"*1\r\n$1048577\r\n".to_vec(),
+                _ => buf = b"*200000\r\n".to_vec(),
+            }
+            match parse_command(&buf) {
+                Ok(_) | Err(_) => {}
+            }
+        }
+
+        // Explicitly assert the Step-1 bounds fire.
+        assert_eq!(
+            parse_command(b"*1\r\n$1048577\r\n"),
+            Err(RespParseError::LengthExceeded)
+        );
+        assert_eq!(
+            parse_command(b"*200000\r\n"),
+            Err(RespParseError::LengthExceeded)
+        );
     }
 }
