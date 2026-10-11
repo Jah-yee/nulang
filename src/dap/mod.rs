@@ -1258,6 +1258,7 @@ pub(crate) mod tests {
     struct AwaitTerminatedReader {
         bytes: std::io::Cursor<Vec<u8>>,
         terminal_rx: std::sync::mpsc::Receiver<()>,
+        waiting_tx: Option<std::sync::mpsc::Sender<()>>,
         finished: bool,
     }
 
@@ -1271,6 +1272,9 @@ pub(crate) mod tests {
                 return Ok(read);
             }
             self.finished = true;
+            if let Some(tx) = self.waiting_tx.take() {
+                let _ = tx.send(());
+            }
             // A generous test failure bound, not a quiescence heuristic for
             // successful execution. No client EOF is delivered before the
             // terminal event has actually been written.
@@ -1361,6 +1365,7 @@ pub(crate) mod tests {
             let reader = AwaitTerminatedReader {
                 bytes: std::io::Cursor::new(input),
                 terminal_rx,
+                waiting_tx: None,
                 finished: false,
             };
             let mut writer = TerminalEventWriter {
