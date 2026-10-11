@@ -21,16 +21,20 @@ class NativeCiWiringTests(unittest.TestCase):
         workflow = WORKFLOW.read_text()
         primary = job_section(workflow, "test")
         minimal = job_section(workflow, "minimal-build")
+        native = job_section(workflow, "native-executable")
 
         # The default-feature compiler intentionally does not contain --emit-exe.
-        self.assertNotIn("Native executable smoke and size report", primary)
-        self.assertIn("--no-default-features --features native-executable --bin nulang", minimal)
-        self.assertIn("--no-default-features --features native-executable --test native_tiny_executable", minimal)
-        self.assertIn("cargo metadata --locked --format-version 1 --no-deps", minimal)
-        self.assertIn('scripts/measure_native_binaries.sh "$cargo_target/debug/nulang"', minimal)
-        self.assertIn('--nulang "$cargo_target/debug/nulang"', minimal)
-        self.assertIn("native-binary-size.json", minimal)
-        self.assertIn("Upload native executable size report", minimal)
+        self.assertNotIn("--features native-executable", primary)
+        # Preserve a truly minimal feature/build lane, with native-specific
+        # failures isolated in their own CI job and timeout budget.
+        self.assertNotIn("--features native-executable", minimal)
+        self.assertIn("--no-default-features --features native-executable --bin nulang", native)
+        self.assertIn("--no-default-features --features native-executable --test native_tiny_executable", native)
+        self.assertIn("cargo metadata --locked --format-version 1 --no-deps", native)
+        self.assertIn('scripts/measure_native_binaries.sh "$cargo_target/debug/nulang"', native)
+        self.assertIn('--nulang "$cargo_target/debug/nulang"', native)
+        self.assertIn("native-binary-size.json", native)
+        self.assertIn("Upload native executable size report", native)
 
 
 if __name__ == "__main__":
