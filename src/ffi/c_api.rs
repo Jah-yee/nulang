@@ -844,6 +844,10 @@ pub unsafe extern "C" fn nulang_owned_value_int_new(runtime: *mut NulangRuntime,
     }
     let rt = unsafe { &mut *runtime };
     rt.clear_error();
+    if Value::int(value).as_int() != Some(value) {
+        rt.last_error = Some("integer is outside Nulang's representable Int range".to_string());
+        return 0;
+    }
     rt.store_owned(OwnedHostValue::Int(value))
 }
 
