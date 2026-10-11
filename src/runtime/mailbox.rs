@@ -470,6 +470,14 @@ impl Mailbox {
         // candidate was rejected by its pattern/guard. It remains `tried` for
         // this receive expression but is no longer the commit target.
         self.active_match = None;
+        // There is nothing to index or stage on an empty mailbox. In
+        // particular, an actor waiting in a receive loop should not allocate
+        // three per-lane hash-map indexes before its first message arrives.
+        // queued_count also includes selectively staged messages, so this
+        // fast path cannot skip a live candidate.
+        if self.is_empty() {
+            return None;
+        }
         self.ensure_receive_indexes();
         self.stage_arrivals();
 
