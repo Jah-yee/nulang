@@ -960,8 +960,25 @@ fn main() {
                     let hir = nulang::hir_lower::lower_module(&ast, &checked.inferred_decl_types);
                     let mir = nulang::mir_lower::lower_module(&hir)?;
                     let output = opts.out_file.clone().unwrap_or_else(|| {
-                        path.strip_suffix(".nula").unwrap_or(path).to_string()
+                        path.strip_suffix(".nula")
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| format!("{path}.bin"))
                     });
+                    // A source file must never become the linker destination.
+                    // Canonicalize existing paths so --out aliases and symlinks
+                    // to the input are rejected before invoking the linker.
+                    if let (Ok(source), Ok(destination)) = (
+                        std::fs::canonicalize(path),
+                        std::fs::canonicalize(&output),
+                    ) {
+                        if source == destination {
+                            return Err(NuError::VMError {
+                                msg: "native executable output cannot overwrite its source file"
+                                    .to_string(),
+                                span: Span::default(),
+                            });
+                        }
+                    }
                     nulang::native_executable::emit_executable(&mir, std::path::Path::new(&output))?;
                     println!("Wrote native executable to {}", output);
                     Ok(())
