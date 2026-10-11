@@ -69,7 +69,7 @@ def exercise(name: str, command: list[str], timeout: float) -> None:
         wd = Path(temp)
         os.mkfifo(wd / "gate.fifo")
         if name == "nulang":
-            command = [command[0], "--backend", "bytecode", "--store", f"json:{wd / 'store'}", str(ROOT / "job.nula")]
+            command = [command[0], "--backend", "bytecode", "--with=fs", "--store", f"json:{wd / 'store'}", str(ROOT / "job.nula")]
         print(f"{name}: isolated store and three separate processes")
         run_phase(command, wd, "prepare", ["PREPARED=1:0"], timeout)
         run_phase(command, wd, "resume", ["RECOVERED=1:0", "COMPLETED=2:1"], timeout)
