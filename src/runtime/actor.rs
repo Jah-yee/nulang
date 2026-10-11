@@ -852,6 +852,28 @@ mod tests {
     }
 
     #[test]
+    fn pooled_generated_name_reuses_storage_and_resets_actor_state() {
+        let mut actor = Actor::new(7, "actor_00000000000000000000", 0);
+        let name_ptr = actor.name.as_ptr();
+        actor.set_state_field("transient", Value::int(42));
+        actor.run_state = ActorRunState::Queued;
+
+        // The pooled fast path must not allocate a replacement name buffer
+        // when the existing buffer is large enough.
+        actor.reset_with_generated_name(8, 0);
+        assert_eq!(actor.name, "actor_8");
+        assert_eq!(actor.name.as_ptr(), name_ptr);
+        assert_eq!(actor.id, 8);
+        assert!(actor.get_state_field("transient").is_none());
+        assert_eq!(actor.run_state, ActorRunState::Idle);
+
+        // A longer ID may grow the buffer, but the generated name is exact.
+        actor.reset_with_generated_name(u64::MAX, 0);
+        assert_eq!(actor.name, format!("actor_{}", u64::MAX));
+        assert_eq!(actor.id, u64::MAX);
+    }
+
+    #[test]
     fn test_actor_set_and_get_state_field() {
         let mut actor = Actor::new(1, "test", 0);
         actor.set_state_field("key", Value::int(42));
