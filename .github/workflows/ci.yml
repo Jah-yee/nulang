@@ -260,7 +260,9 @@ jobs:
         run: cargo build --locked --no-default-features --features native-executable --bin nulang
 
       - name: Measure native binary size and dynamic dependencies
-        run: bash scripts/measure_native_binaries.sh target/debug/nulang target/native-size-smoke
+        run: |
+          cargo_target="$(cargo metadata --locked --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+          bash scripts/measure_native_binaries.sh "$cargo_target/debug/nulang" "$cargo_target/native-size-smoke"
 
       - name: Smoke test standalone Savina runner
         run: |
