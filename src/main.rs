@@ -946,7 +946,7 @@ fn main() {
             return;
         }
         if opts.emit_exe {
-            #[cfg(feature = "native-codegen")]
+            #[cfg(feature = "native-executable")]
             {
                 if opts.target != "native" {
                     eprintln!("Error: --emit-exe requires --target native");
@@ -988,9 +988,9 @@ fn main() {
                     std::process::exit(exit_code(&e));
                 }
             }
-            #[cfg(not(feature = "native-codegen"))]
+            #[cfg(not(feature = "native-executable"))]
             {
-                eprintln!("Error: --emit-exe requires the native-codegen feature");
+                eprintln!("Error: --emit-exe requires the native-executable feature");
                 std::process::exit(1);
             }
             return;
@@ -1228,7 +1228,7 @@ fn print_help() {
         println!("  --out <file>     Output file for WASM backends (default: out.wasm)");
     }
     println!("  --out <file>     Output path for --emit-nbc (default: <FILE> with .nbc extension)");
-    if cfg!(feature = "native-codegen") {
+    if cfg!(feature = "native-executable") {
         println!("  --emit-exe       Experimental Linux executable (literal string IO + straight-line Int)");
         println!("                   Linked against host libc using cc; not fully static");
     }
