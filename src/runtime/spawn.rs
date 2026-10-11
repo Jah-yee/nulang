@@ -622,7 +622,7 @@ mod authority_tests {
     use crate::runtime::persistence::PersistenceStore;
 
     #[test]
-    fn spawn_from_pool_reuses_default_name_buffer() {
+    fn test_spawn_from_pool_reuses_default_name_buffer() {
         let mut rt = Runtime::new();
         let pooled = Actor::new(1, "actor_00000000000000000000", 0);
         let name_ptr = pooled.name.as_ptr();
