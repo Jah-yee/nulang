@@ -16,6 +16,7 @@ use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::typechecker::TypeChecker;
 use crate::types::NuError;
+use crate::value_layout::{TAG_MASK, TAG_PTR};
 use crate::vm::{Value, VM};
 
 // ---------------------------------------------------------------------------
@@ -66,6 +67,16 @@ impl NulangRuntime {
         handle
     }
 
+    /// Resolve an externally visible C module handle to the unique compiled
+    /// module it references. Public handles intentionally have fresh identity
+    /// even when compilation reuses a cached module, so they must never be
+    /// used directly as indices into `modules`.
+    fn module_index_for_handle(&self, module_handle: usize) -> Option<usize> {
+        let module_index = *self.module_handles.get(module_handle)?;
+        self.modules.get(module_index)?;
+        Some(module_index)
+    }
+
     fn compile(&mut self, source: &str) -> Option<usize> {
         self.clear_error();
 
@@ -96,7 +107,7 @@ impl NulangRuntime {
 
     fn run(&mut self, module_handle: usize) -> Option<Value> {
         self.clear_error();
-        let module_index = *self.module_handles.get(module_handle)?;
+        let module_index = self.module_index_for_handle(module_handle)?;
         let module = self.modules.get(module_index)?.clone();
         let mut vm = VM::new();
         vm.load_module(module);
@@ -116,11 +127,21 @@ impl NulangRuntime {
         args: &[NulangValue],
     ) -> Option<Value> {
         self.clear_error();
-        let module = self.modules.get(module_handle)?.clone();
+        let module_index = self.module_index_for_handle(module_handle)?;
+        let module = self.modules.get(module_index)?.clone();
         let offset = module.function_offset_by_name(name)?;
         let mut vm = VM::new();
         vm.load_module(module);
-        let arg_values: Vec<Value> = args.iter().map(|v| Value::from(*v)).collect();
+        let mut arg_values = Vec::with_capacity(args.len());
+        for &arg in args {
+            match value_from_c(arg) {
+                Ok(value) => arg_values.push(value),
+                Err(message) => {
+                    self.last_error = Some(message.to_string());
+                    return None;
+                }
+            }
+        }
         match vm.call_function(0, offset, &arg_values) {
             Ok(value) => Some(self.stabilize_string_value(value, &vm, module_handle)),
             Err(e) => {
@@ -131,7 +152,8 @@ impl NulangRuntime {
     }
 
     fn add_module_string(&mut self, module_handle: usize, s: &str) -> Option<Value> {
-        let module = self.modules.get_mut(module_handle)?;
+        let module_index = self.module_index_for_handle(module_handle)?;
+        let module = self.modules.get_mut(module_index)?;
         let idx = module.add_string_constant(s);
         Some(Value::string(idx as u32))
     }
@@ -145,10 +167,13 @@ impl NulangRuntime {
             return value;
         }
         if let Some(bytes) = vm.string_bytes(value) {
-            if let Some(module) = self.modules.get_mut(module_handle) {
-                let id =
-                    module.add_string_constant(String::from_utf8_lossy(&bytes).into_owned()) as u32;
-                return Value::string(id);
+            if let Some(module_index) = self.module_index_for_handle(module_handle) {
+                if let Some(module) = self.modules.get_mut(module_index) {
+                    let id = module
+                        .add_string_constant(String::from_utf8_lossy(&bytes).into_owned())
+                        as u32;
+                    return Value::string(id);
+                }
             }
         }
         value
@@ -263,10 +288,18 @@ impl From<Value> for NulangValue {
     }
 }
 
-impl From<NulangValue> for Value {
-    fn from(value: NulangValue) -> Self {
-        Value::from_bits(value.raw)
+const INVALID_C_VALUE: &str =
+    "C ABI rejected a pointer-tagged NulangValue: host heap pointers cannot be supplied by C";
+
+/// Convert an ABI value into a host `Value` only when it cannot forge a host
+/// heap pointer. C callers may construct arbitrary `NulangValue` bits even
+/// though `raw` is private to Rust, so the old blanket `From<NulangValue>`
+/// implementation was not a trustworthy provenance boundary.
+fn value_from_c(value: NulangValue) -> Result<Value, &'static str> {
+    if (value.raw & TAG_MASK) == TAG_PTR {
+        return Err(INVALID_C_VALUE);
     }
+    Value::try_from_untrusted_bits(value.raw)
 }
 
 // ---------------------------------------------------------------------------
@@ -356,6 +389,8 @@ pub unsafe extern "C" fn nulang_run(
 /// # Safety
 /// `runtime` must be valid, `name` a null-terminated UTF-8 string, and
 /// `args` must point to `arg_count` valid values (or be NULL when zero).
+/// Pointer-tagged values are not accepted from C because their payload cannot
+/// establish host-heap provenance.
 #[no_mangle]
 pub unsafe extern "C" fn nulang_call_function(
     runtime: *mut NulangRuntime,
@@ -378,7 +413,7 @@ pub unsafe extern "C" fn nulang_call_function(
     } else if args.is_null() {
         return Value::nil().into();
     } else {
-        // SAFETY: caller guarantees args points to arg_count valid values.
+        // SAFETY: caller guarantees args points to arg_count initialized ABI values.
         unsafe { std::slice::from_raw_parts(args, arg_count) }
     };
     match rt.call_function(module_handle as usize, name_str, args_slice) {
@@ -419,38 +454,52 @@ pub unsafe extern "C" fn nulang_last_error(runtime: *mut NulangRuntime) -> *cons
 
 /// Extract an integer from a Nulang value.
 ///
-/// Returns 0 if the value is not an integer.
+/// Returns 0 if the value is not an integer or if C supplied a forbidden
+/// host-pointer-tagged value.
 #[no_mangle]
 pub extern "C" fn nulang_value_int(value: NulangValue) -> i64 {
-    Value::from(value).as_int().unwrap_or(0)
+    value_from_c(value)
+        .ok()
+        .and_then(|value| value.as_int())
+        .unwrap_or(0)
 }
 
 /// Extract a float from a Nulang value.
 ///
-/// Returns 0.0 if the value is not a float.
+/// Returns 0.0 if the value is not a float or is rejected at the C boundary.
 #[no_mangle]
 pub extern "C" fn nulang_value_float(value: NulangValue) -> f64 {
-    Value::from(value).as_float().unwrap_or(0.0)
+    value_from_c(value)
+        .ok()
+        .and_then(|value| value.as_float())
+        .unwrap_or(0.0)
 }
 
 /// Extract a boolean from a Nulang value.
 ///
-/// Returns `false` if the value is not a boolean.
+/// Returns `false` if the value is not a boolean or is rejected at the C boundary.
 #[no_mangle]
 pub extern "C" fn nulang_value_bool(value: NulangValue) -> bool {
-    Value::from(value).as_bool().unwrap_or(false)
+    value_from_c(value)
+        .ok()
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
 }
 
 /// Check whether a value is `nil`.
 #[no_mangle]
 pub extern "C" fn nulang_value_is_nil(value: NulangValue) -> bool {
-    Value::from(value).is_nil()
+    value_from_c(value)
+        .map(|value| value.is_nil())
+        .unwrap_or(false)
 }
 
 /// Check whether a value is the unit value `()`.
 #[no_mangle]
 pub extern "C" fn nulang_value_is_unit(value: NulangValue) -> bool {
-    Value::from(value).is_unit()
+    value_from_c(value)
+        .map(|value| value.is_unit())
+        .unwrap_or(false)
 }
 
 /// Create an integer Nulang value.
@@ -537,6 +586,9 @@ pub unsafe extern "C" fn nulang_free_string(
 /// The returned pointer is owned by the runtime and remains valid until the
 /// runtime is freed. The caller must not free it.
 ///
+/// Pointer-tagged raw values supplied by C are rejected because a numeric
+/// payload cannot establish that it points into a live Nulang host heap.
+///
 /// # Safety
 /// `runtime` must be a valid pointer returned by `nulang_runtime_new`.
 #[no_mangle]
@@ -549,7 +601,13 @@ pub unsafe extern "C" fn nulang_value_to_string(
     }
     // SAFETY: runtime is non-null and valid.
     let rt = unsafe { &mut *runtime };
-    rt.value_to_cached_cstr(Value::from(value))
+    match value_from_c(value) {
+        Ok(value) => rt.value_to_cached_cstr(value),
+        Err(message) => {
+            rt.last_error = Some(message.to_string());
+            std::ptr::null()
+        }
+    }
 }
 
 /// Register a native C function so it can be called from Nulang.
@@ -667,6 +725,32 @@ mod tests {
     }
 
     #[test]
+    fn test_cached_compile_handle_supports_module_operations() {
+        let rt = nulang_runtime_new();
+        assert!(!rt.is_null());
+
+        let source =
+            CString::new("fn len(s: String) -> Int { perform String.length(s) } len(\"\")")
+                .unwrap();
+        let first = unsafe { nulang_compile(rt, source.as_ptr()) };
+        let cached = unsafe { nulang_compile(rt, source.as_ptr()) };
+        assert!(first >= 0 && cached >= 0);
+        assert_ne!(first, cached);
+
+        let text = CString::new("cached").unwrap();
+        let arg = unsafe { nulang_module_string(rt, cached, text.as_ptr()) };
+        assert!(!nulang_value_is_nil(arg));
+
+        let args = [arg];
+        let name = CString::new("len").unwrap();
+        let result =
+            unsafe { nulang_call_function(rt, cached, name.as_ptr(), args.as_ptr(), args.len()) };
+        assert_eq!(nulang_value_int(result), 6);
+
+        unsafe { nulang_runtime_free(rt) };
+    }
+
+    #[test]
     fn test_different_source_creates_distinct_compile_cache_entries() {
         let rt = nulang_runtime_new();
         let first_source = CString::new("1 + 1").unwrap();
@@ -719,6 +803,48 @@ mod tests {
     }
 
     #[test]
+    fn test_c_api_rejects_forged_host_pointer_values() {
+        let forged = NulangValue {
+            raw: TAG_PTR | 0x1234,
+        };
+        assert_eq!(nulang_value_int(forged), 0);
+        assert_eq!(nulang_value_float(forged), 0.0);
+        assert!(!nulang_value_bool(forged));
+        assert!(!nulang_value_is_nil(forged));
+        assert!(!nulang_value_is_unit(forged));
+
+        let rt = nulang_runtime_new();
+        let ptr = unsafe { nulang_value_to_string(rt, forged) };
+        assert!(ptr.is_null());
+        let err = unsafe { nulang_last_error(rt) };
+        assert!(!err.is_null());
+        let message = unsafe { CStr::from_ptr(err) }.to_string_lossy();
+        assert!(message.contains("pointer-tagged"));
+        unsafe { nulang_runtime_free(rt) };
+    }
+
+    #[test]
+    fn test_c_api_call_rejects_forged_host_pointer_argument() {
+        let rt = nulang_runtime_new();
+        let source = CString::new("fn id(x: Int) -> Int { x } id(0)").unwrap();
+        let handle = unsafe { nulang_compile(rt, source.as_ptr()) };
+        assert!(handle >= 0);
+        let name = CString::new("id").unwrap();
+        let forged = [NulangValue {
+            raw: TAG_PTR | 0x1234,
+        }];
+        let result = unsafe {
+            nulang_call_function(rt, handle, name.as_ptr(), forged.as_ptr(), forged.len())
+        };
+        assert!(nulang_value_is_nil(result));
+        let err = unsafe { nulang_last_error(rt) };
+        assert!(!err.is_null());
+        let message = unsafe { CStr::from_ptr(err) }.to_string_lossy();
+        assert!(message.contains("pointer-tagged"));
+        unsafe { nulang_runtime_free(rt) };
+    }
+
+    #[test]
     fn test_c_api_value_to_string() {
         let rt = nulang_runtime_new();
         let value: NulangValue = Value::int(123).into();
@@ -759,6 +885,41 @@ mod tests {
         assert_eq!(nulang_value_int(result), 42);
 
         // SAFETY: rt is valid.
+        unsafe { nulang_runtime_free(rt) };
+    }
+
+    #[test]
+    fn test_c_api_call_function_uses_bytecode_offset_for_non_first_function() {
+        let rt = nulang_runtime_new();
+        let source =
+            CString::new("fn first() -> Int { 7 } fn second() -> Int { 42 } first()").unwrap();
+
+        let handle = unsafe { nulang_compile(rt, source.as_ptr()) };
+        assert!(handle >= 0, "compile failed");
+
+        // Prove this fixture would fail if the function-table index were
+        // accidentally passed to VM::call_function as a bytecode PC.
+        let runtime = unsafe { &*rt };
+        let module_index = runtime.module_handles[handle as usize];
+        let module = &runtime.modules[module_index];
+        let offset = module
+            .function_offset_by_name("second")
+            .expect("second function offset");
+        let table_index = module
+            .function_table
+            .iter()
+            .position(|&candidate| candidate == offset)
+            .expect("second function table entry");
+        assert_ne!(
+            offset, table_index,
+            "regression fixture requires bytecode offset != function-table index"
+        );
+
+        let name = CString::new("second").unwrap();
+        let result =
+            unsafe { nulang_call_function(rt, handle, name.as_ptr(), std::ptr::null(), 0) };
+        assert_eq!(nulang_value_int(result), 42);
+
         unsafe { nulang_runtime_free(rt) };
     }
 

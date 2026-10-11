@@ -1156,6 +1156,7 @@ impl EffectChecker {
             self.check_decl(decl)?;
         }
         check_durable_determinism(&flat)?;
+        crate::migration_purity::check_module(decls)?;
         self.check_resource_grants()?;
         Ok(())
     }
@@ -1319,31 +1320,68 @@ impl<'a> DurableEffectWalker<'a> {
         }
     }
 
-    /// Check every step body (plus saga compensations) of every workflow decl.
+    /// Check every replay surface: workflow step bodies (plus saga
+    /// compensations), the behavior bodies of `persistent` actors and
+    /// `entity` actors, and entity `apply` handlers. All of these re-run
+    /// on recovery replay, so an ambient non-deterministic perform
+    /// diverges from the journaled state exactly as in a workflow step.
     fn check(&mut self, decls: &[&'a Decl]) -> NuResult<()> {
         for decl in decls {
-            if let Decl::Workflow {
-                name,
-                items,
-                compensate,
-                ..
-            } = decl
-            {
-                for item in items {
-                    let steps: &[WorkflowStep] = match item {
-                        WorkflowItem::Step(s) => std::slice::from_ref(s),
-                        WorkflowItem::Parallel(steps) => steps,
-                    };
-                    for step in steps {
-                        self.walk(name, &step.name, &step.body, &[])?;
-                        if let Some(comp) = &step.compensate {
-                            self.walk(name, &step.name, comp, &[])?;
+            match decl {
+                Decl::Workflow {
+                    name,
+                    items,
+                    compensate,
+                    ..
+                } => {
+                    for item in items {
+                        let steps: &[WorkflowStep] = match item {
+                            WorkflowItem::Step(s) => std::slice::from_ref(s),
+                            WorkflowItem::Parallel(steps) => steps,
+                        };
+                        for step in steps {
+                            let scope = format!("workflow '{name}' step '{}'", step.name);
+                            self.walk(&scope, &step.body, &[])?;
+                            if let Some(comp) = &step.compensate {
+                                self.walk(&scope, comp, &[])?;
+                            }
                         }
                     }
+                    if let Some(comp) = compensate {
+                        self.walk(&format!("workflow '{name}' compensate"), comp, &[])?;
+                    }
                 }
-                if let Some(comp) = compensate {
-                    self.walk(name, "workflow compensate", comp, &[])?;
+                Decl::Actor {
+                    name,
+                    persistent,
+                    behaviors,
+                    events,
+                    apply_handlers,
+                    ..
+                } => {
+                    // `persistent` actors replay behavior bodies on
+                    // recovery; entities (detected by their `events`
+                    // block, matching the typechecker) additionally
+                    // replay `apply` handlers to rebuild state.
+                    let is_entity = !events.is_empty();
+                    if !*persistent && !is_entity {
+                        continue;
+                    }
+                    let kind = if is_entity {
+                        "entity"
+                    } else {
+                        "persistent actor"
+                    };
+                    for b in behaviors {
+                        let scope = format!("behavior '{}' of {kind} '{name}'", b.name);
+                        self.walk(&scope, &b.body, &[])?;
+                    }
+                    for h in apply_handlers {
+                        let scope = format!("apply handler '{}' of entity '{name}'", h.event);
+                        self.walk(&scope, &h.body, &[])?;
+                    }
                 }
+                _ => {}
             }
         }
         Ok(())
@@ -1351,8 +1389,7 @@ impl<'a> DurableEffectWalker<'a> {
 
     fn expand_fn(
         &mut self,
-        wf: &str,
-        step: &str,
+        scope: &str,
         name: &'a str,
         handled: &[(String, Option<String>)],
     ) -> NuResult<()> {
@@ -1361,7 +1398,7 @@ impl<'a> DurableEffectWalker<'a> {
         }
         if let Some(body) = self.fns.get(name).copied() {
             self.visiting.push(name);
-            let r = self.walk(wf, step, body, handled);
+            let r = self.walk(scope, body, handled);
             self.visiting.pop();
             r?;
         }
@@ -1370,8 +1407,7 @@ impl<'a> DurableEffectWalker<'a> {
 
     fn walk(
         &mut self,
-        wf: &str,
-        step: &str,
+        scope: &str,
         expr: &'a Expr,
         handled: &[(String, Option<String>)],
     ) -> NuResult<()> {
@@ -1382,11 +1418,10 @@ impl<'a> DurableEffectWalker<'a> {
                 args,
                 span,
             } => {
-                if is_forbidden_in_durable(effect, op) && !is_handled_by_user(effect, op, handled)
-                {
+                if is_forbidden_in_durable(effect, op) && !is_handled_by_user(effect, op, handled) {
                     return Err(NuError::EffectError {
                         msg: format!(
-                            "workflow '{wf}' step '{step}': effect '{effect}.{op}' is not allowed in durable steps — a step re-run after a crash (signal/LLM suspend) would execute it again with different results; handle it locally with `handle ... with` (deterministic implementation) or move it outside the workflow"
+                            "{scope}: effect '{effect}.{op}' is not allowed in durable replay surfaces — a re-run after a crash (signal/LLM suspend) would execute it again with different results; handle it locally with `handle ... with` (deterministic implementation) or move it outside the durable context"
                         ),
                         span: *span,
                         missing_effects: None,
@@ -1394,13 +1429,11 @@ impl<'a> DurableEffectWalker<'a> {
                     });
                 }
                 for a in args {
-                    self.walk(wf, step, a, handled)?;
+                    self.walk(scope, a, handled)?;
                 }
                 Ok(())
             }
-            Expr::Handle {
-                body, handlers, ..
-            } => {
+            Expr::Handle { body, handlers, .. } => {
                 // Performs inside the handled body that an arm binds are
                 // intercepted by user code — extend the handled set for the
                 // body walk only.
@@ -1415,29 +1448,29 @@ impl<'a> DurableEffectWalker<'a> {
                         },
                     ));
                 }
-                self.walk(wf, step, body, &inner)?;
+                self.walk(scope, body, &inner)?;
                 // Handler bodies run with the OUTER set: a perform of the
                 // arm's own effect inside the arm is re-entrant, not covered
                 // by the arm.
                 for h in handlers {
-                    self.walk(wf, step, &h.body, handled)?;
+                    self.walk(scope, &h.body, handled)?;
                 }
                 Ok(())
             }
             Expr::App { func, args, .. } => {
-                self.walk(wf, step, func, handled)?;
+                self.walk(scope, func, handled)?;
                 for a in args {
-                    self.walk(wf, step, a, handled)?;
+                    self.walk(scope, a, handled)?;
                 }
                 if let Expr::Var(name, _) = &**func {
-                    self.expand_fn(wf, step, name.as_str(), handled)?;
+                    self.expand_fn(scope, name.as_str(), handled)?;
                 }
                 Ok(())
             }
-            Expr::Lambda { body, .. } => self.walk(wf, step, body, handled),
+            Expr::Lambda { body, .. } => self.walk(scope, body, handled),
             Expr::Let { value, body, .. } | Expr::LetRec { value, body, .. } => {
-                self.walk(wf, step, value, handled)?;
-                self.walk(wf, step, body, handled)
+                self.walk(scope, value, handled)?;
+                self.walk(scope, body, handled)
             }
             Expr::If {
                 cond,
@@ -1445,51 +1478,51 @@ impl<'a> DurableEffectWalker<'a> {
                 else_branch,
                 ..
             } => {
-                self.walk(wf, step, cond, handled)?;
-                self.walk(wf, step, then_branch, handled)?;
+                self.walk(scope, cond, handled)?;
+                self.walk(scope, then_branch, handled)?;
                 if let Some(e) = else_branch {
-                    self.walk(wf, step, e, handled)?;
+                    self.walk(scope, e, handled)?;
                 }
                 Ok(())
             }
             Expr::Match {
                 scrutinee, arms, ..
             } => {
-                self.walk(wf, step, scrutinee, handled)?;
+                self.walk(scope, scrutinee, handled)?;
                 for (_, guard, arm_body) in arms {
                     if let Some(g) = guard {
-                        self.walk(wf, step, g, handled)?;
+                        self.walk(scope, g, handled)?;
                     }
-                    self.walk(wf, step, arm_body, handled)?;
+                    self.walk(scope, arm_body, handled)?;
                 }
                 Ok(())
             }
             Expr::Block { exprs, .. } | Expr::Par { exprs, .. } => {
                 for e in exprs {
-                    self.walk(wf, step, e, handled)?;
+                    self.walk(scope, e, handled)?;
                 }
                 Ok(())
             }
-            Expr::FieldAccess { expr, .. } => self.walk(wf, step, expr, handled),
+            Expr::FieldAccess { expr, .. } => self.walk(scope, expr, handled),
             Expr::RecordUpdate { base, fields, .. } => {
-                self.walk(wf, step, base, handled)?;
+                self.walk(scope, base, handled)?;
                 for (_, e) in fields {
-                    self.walk(wf, step, e, handled)?;
+                    self.walk(scope, e, handled)?;
                 }
                 Ok(())
             }
             Expr::Index { arr, idx, .. } => {
-                self.walk(wf, step, arr, handled)?;
-                self.walk(wf, step, idx, handled)
+                self.walk(scope, arr, handled)?;
+                self.walk(scope, idx, handled)
             }
             Expr::Binary { left, right, .. } => {
-                self.walk(wf, step, left, handled)?;
-                self.walk(wf, step, right, handled)
+                self.walk(scope, left, handled)?;
+                self.walk(scope, right, handled)
             }
-            Expr::Unary { expr, .. } => self.walk(wf, step, expr, handled),
+            Expr::Unary { expr, .. } => self.walk(scope, expr, handled),
             Expr::Assign { target, value, .. } => {
-                self.walk(wf, step, target, handled)?;
-                self.walk(wf, step, value, handled)
+                self.walk(scope, target, handled)?;
+                self.walk(scope, value, handled)
             }
             Expr::Spawn {
                 actor_type,
@@ -1498,85 +1531,83 @@ impl<'a> DurableEffectWalker<'a> {
                 target_node,
                 ..
             } => {
-                self.walk(wf, step, actor_type, handled)?;
+                self.walk(scope, actor_type, handled)?;
                 for (_, e) in init {
-                    self.walk(wf, step, e, handled)?;
+                    self.walk(scope, e, handled)?;
                 }
                 if let Some(args) = positional_args {
                     for a in args {
-                        self.walk(wf, step, a, handled)?;
+                        self.walk(scope, a, handled)?;
                     }
                 }
                 if let Some(n) = target_node {
-                    self.walk(wf, step, n, handled)?;
+                    self.walk(scope, n, handled)?;
                 }
                 Ok(())
             }
             Expr::Send { actor, args, .. } | Expr::Ask { actor, args, .. } => {
-                self.walk(wf, step, actor, handled)?;
+                self.walk(scope, actor, handled)?;
                 for a in args {
-                    self.walk(wf, step, a, handled)?;
+                    self.walk(scope, a, handled)?;
                 }
                 Ok(())
             }
             Expr::Receive { arms, after, .. } => {
                 for (_, _, guard, arm_body) in arms {
                     if let Some(g) = guard {
-                        self.walk(wf, step, g, handled)?;
+                        self.walk(scope, g, handled)?;
                     }
-                    self.walk(wf, step, arm_body, handled)?;
+                    self.walk(scope, arm_body, handled)?;
                 }
                 if let Some((timeout, body)) = after {
-                    self.walk(wf, step, timeout, handled)?;
-                    self.walk(wf, step, body, handled)?;
+                    self.walk(scope, timeout, handled)?;
+                    self.walk(scope, body, handled)?;
                 }
                 Ok(())
             }
             Expr::Emit { args, .. } => {
                 for a in args {
-                    self.walk(wf, step, a, handled)?;
+                    self.walk(scope, a, handled)?;
                 }
                 Ok(())
             }
-            Expr::GrainRef { key, .. } => self.walk(wf, step, key, handled),
-            Expr::Resume { value, .. } => self.walk(wf, step, value, handled),
+            Expr::GrainRef { key, .. } => self.walk(scope, key, handled),
+            Expr::Resume { value, .. } => self.walk(scope, value, handled),
             Expr::Migrate { actor, node, .. } => {
-                self.walk(wf, step, actor, handled)?;
-                self.walk(wf, step, node, handled)
+                self.walk(scope, actor, handled)?;
+                self.walk(scope, node, handled)
             }
             Expr::CapAnnotate { expr, .. }
             | Expr::TypeAnnotate { expr, .. }
-            | Expr::Consume { expr, .. } => self.walk(wf, step, expr, handled),
-            Expr::Recover { body, .. } => self.walk(wf, step, body, handled),
+            | Expr::Consume { expr, .. } => self.walk(scope, expr, handled),
+            Expr::Recover { body, .. } => self.walk(scope, body, handled),
             Expr::Pipe { left, right, .. } => {
-                self.walk(wf, step, left, handled)?;
-                self.walk(wf, step, right, handled)
+                self.walk(scope, left, handled)?;
+                self.walk(scope, right, handled)
             }
-            Expr::For {
-                iterable, body, ..
-            } => {
-                self.walk(wf, step, iterable, handled)?;
-                self.walk(wf, step, body, handled)
+            Expr::For { iterable, body, .. } => {
+                self.walk(scope, iterable, handled)?;
+                self.walk(scope, body, handled)
             }
             Expr::While { cond, body, .. } => {
-                self.walk(wf, step, cond, handled)?;
-                self.walk(wf, step, body, handled)
+                self.walk(scope, cond, handled)?;
+                self.walk(scope, body, handled)
             }
-            Expr::Defer { expr, .. } => self.walk(wf, step, expr, handled),
-            Expr::Hide { body, .. } | Expr::Seal { body, .. } => self.walk(wf, step, body, handled),
+            Expr::Defer { expr, .. } => self.walk(scope, expr, handled),
+            Expr::Hide { body, .. } | Expr::Seal { body, .. } => self.walk(scope, body, handled),
             Expr::FString(parts, _) | Expr::Tuple(parts, _) | Expr::Array(parts, _) => {
                 for e in parts {
-                    self.walk(wf, step, e, handled)?;
+                    self.walk(scope, e, handled)?;
                 }
                 Ok(())
             }
             Expr::Record(fields, _) => {
                 for (_, e) in fields {
-                    self.walk(wf, step, e, handled)?;
+                    self.walk(scope, e, handled)?;
                 }
                 Ok(())
             }
-            Expr::Return(Some(e), _) => self.walk(wf, step, e, handled),
+            Expr::Return(Some(e), _) => self.walk(scope, e, handled),
             // Leaves: nothing to walk.
             Expr::Literal(..)
             | Expr::Var(..)
@@ -1789,16 +1820,15 @@ impl CapabilityAnalyzer {
             if let Some(fs) = first_span {
                 msg.push_str(&format!(" (first moved at line {}:{})", fs.start, fs.end));
             }
-            msg.push_str("\nhelp: iso bindings transfer ownership on send/ask");
-            msg.push_str(&format!(
-                "\nhelp: use `consume {}` to explicitly discharge the iso before the move, or restructure to avoid the second use",
-                name
-            ));
+            msg.push_str("\nwhy: `iso` means unique ownership; send/ask/closure capture transfers that ownership to the receiver");
+            msg.push_str(
+                "\nhelp: move the value exactly once and stop using the original binding; if the sender still needs the data, create an immutable `val` snapshot before the move",
+            );
             self.diagnostics.push(msg.clone());
             return Err(NuError::cap_error_explained(
                 msg,
                 span,
-                "an iso binding transfers ownership on send/ask/closure-capture and cannot be moved twice",
+                "an `iso` value has exactly one owner; after ownership transfer, accessing the original binding would create a second alias to actor-isolated mutable state",
             ));
         }
         self.first_consumed.insert(name.to_string(), span);
@@ -1848,9 +1878,14 @@ impl CapabilityAnalyzer {
                     if let Some(fs) = first_span {
                         msg.push_str(&format!(" (first moved at line {}:{})", fs.start, fs.end));
                     }
-                    msg.push_str("\nhelp: iso bindings transfer ownership on send/ask and may be used at most once thereafter");
+                    msg.push_str("\nwhy: `iso` denotes unique ownership, and a prior send/ask/closure capture transferred that ownership away from this actor");
+                    msg.push_str("\nhelp: stop using the original binding after the move; if both sides need the data, send an immutable `val` snapshot instead");
                     self.diagnostics.push(msg.clone());
-                    return Err(NuError::cap_error(msg, *span));
+                    return Err(NuError::cap_error_explained(
+                        msg,
+                        *span,
+                        "using a moved `iso` value would reintroduce an alias to state whose ownership was already transferred",
+                    ));
                 }
                 Ok(cap)
             }
@@ -2224,26 +2259,45 @@ impl CapabilityAnalyzer {
                     if *remote {
                         if !arg_cap.is_remote_sendable() {
                             let span = expr_span(arg);
-                            self.diagnostics.push(format!(
-                                "remote send argument with capability {} is not network-sendable",
+                            let msg = format!(
+                                "remote send argument with capability {} is not network-sendable\nwhy: remote messages cross a serialization boundary, so actor-local aliases and transferable local ownership cannot be reconstructed safely on another node\nhelp: send deeply immutable `val` data, an opaque `tag`, or a serializable `linear` value; for `iso`, first project the data into an immutable value",
                                 arg_cap
-                            ));
-                            return Err(NuError::cap_error(format!(
-                                    "remote send argument must be val, tag, or linear (serializable), got {}",
+                            );
+                            self.diagnostics.push(msg.clone());
+                            return Err(NuError::cap_error_explained(
+                                msg,
+                                span,
+                                format!(
+                                    "`{}` does not satisfy the remote-send contract; remote sends accept only val, tag, or linear values",
                                     arg_cap
-                                ), span));
+                                ),
+                            ));
                         }
                     } else {
                         if !arg_cap.is_sendable() {
                             let span = expr_span(arg);
-                            self.diagnostics.push(format!(
-                                "send argument with capability {} is not sendable",
-                                arg_cap
+                            let reason = match arg_cap {
+                                Capability::Ref | Capability::Trn => {
+                                    "this capability may alias mutable state owned by the sending actor"
+                                }
+                                Capability::Box => {
+                                    "this capability is a borrowed/opaque view whose lifetime and ownership stay with the sending actor"
+                                }
+                                _ => "this capability does not satisfy Nulang's actor-isolation send contract",
+                            };
+                            let msg = format!(
+                                "send argument with capability {} is not sendable\nwhy: {}\nhelp: use `val` for immutable shared data, or transfer a uniquely owned `iso`/linear value exactly once",
+                                arg_cap, reason
+                            );
+                            self.diagnostics.push(msg.clone());
+                            return Err(NuError::cap_error_explained(
+                                msg,
+                                span,
+                                format!(
+                                    "only lineariso, iso, linear, val, and tag may cross an actor boundary; `{}` cannot because {}",
+                                    arg_cap, reason
+                                ),
                             ));
-                            return Err(NuError::cap_error(format!(
-                                    "send argument must be sendable (lineariso, iso, linear, val, or tag), got {}",
-                                    arg_cap
-                                ), span));
                         }
                     }
                     // Consume Iso bindings on send: passing an iso value
@@ -2382,9 +2436,7 @@ impl CapabilityAnalyzer {
             // exactly-once obligation for bindings used only inside arms —
             // previously arms were never walked, so a `g(x)` in an arm plus a
             // `g(x)` after `resume` both passed.
-            Expr::Handle {
-                body, handlers, ..
-            } => {
+            Expr::Handle { body, handlers, .. } => {
                 let base = consumed.clone();
                 for h in handlers {
                     let mut arm_consumed = base.clone();
@@ -2586,17 +2638,26 @@ impl CapabilityAnalyzer {
         if cap.is_sendable() {
             Ok(())
         } else {
+            let reason = match cap {
+                Capability::Ref | Capability::Trn => {
+                    "it may alias mutable state that remains owned by the current actor"
+                }
+                Capability::Box => {
+                    "it is a borrowed/opaque view whose lifetime remains tied to the current actor"
+                }
+                _ => "it does not satisfy the actor-isolation send contract",
+            };
             let msg = format!(
-                "capability {} is not sendable (must be lineariso, iso, linear, val, or tag)",
-                cap
+                "capability {} is not sendable\nwhy: {}\nhelp: freeze/copy the data into `val`, or transfer uniquely owned data as `iso`/linear exactly once",
+                cap, reason
             );
             self.diagnostics.push(msg.clone());
             Err(NuError::cap_error_explained(
                 msg,
                 span,
                 format!(
-                    "only lineariso, iso, linear, val, and tag may cross an actor boundary; `{}` cannot",
-                    cap
+                    "only lineariso, iso, linear, val, and tag may cross an actor boundary; `{}` cannot because {}",
+                    cap, reason
                 ),
             ))
         }
@@ -2767,7 +2828,9 @@ fn stmt_is_single_shot(stmt: &crate::hir::Stmt) -> bool {
         crate::hir::Stmt::Let { value, .. } | crate::hir::Stmt::Assign { value, .. } => {
             rvalue_is_single_shot(value)
         }
-        crate::hir::Stmt::StateSet { .. } | crate::hir::Stmt::Emit { .. } => true,
+        crate::hir::Stmt::StateSet { .. }
+        | crate::hir::Stmt::Emit { .. }
+        | crate::hir::Stmt::ParallelMarker { .. } => true,
     }
 }
 
@@ -3481,6 +3544,19 @@ mod tests {
         let ctx2 = ctx.with_binding("ref_var", Capability::Ref);
         let result = analyzer.infer_cap(&ctx2, &send);
         assert!(result.is_err(), "send with ref argument should fail");
+        let diagnostic = analyzer.diagnostics.join("\n");
+        assert!(
+            diagnostic.contains("why:"),
+            "diagnostic should explain the isolation failure"
+        );
+        assert!(
+            diagnostic.contains("alias mutable state"),
+            "diagnostic should explain why ref is unsafe"
+        );
+        assert!(
+            diagnostic.contains("help:"),
+            "diagnostic should provide an actionable fix"
+        );
     }
 
     #[test]
@@ -3498,6 +3574,15 @@ mod tests {
         };
         let result = analyzer.infer_cap(&ctx, &send);
         assert!(result.is_err(), "remote send with iso argument should fail");
+        let diagnostic = analyzer.diagnostics.join("\n");
+        assert!(
+            diagnostic.contains("serialization boundary"),
+            "remote diagnostic should explain the boundary"
+        );
+        assert!(
+            diagnostic.contains("immutable `val`"),
+            "remote diagnostic should suggest the safe projection"
+        );
     }
 
     #[test]
@@ -4756,7 +4841,7 @@ mod tests {
             .map(|e| e.to_string())
             .unwrap_or_default();
         assert!(
-            err.contains("effect 'Time.now_ms' is not allowed in durable steps"),
+            err.contains("effect 'Time.now_ms' is not allowed in durable replay surfaces"),
             "ambient Time in a durable step must be rejected, got: {:?}",
             err
         );
@@ -4781,9 +4866,84 @@ mod tests {
             .map(|e| e.to_string())
             .unwrap_or_default();
         assert!(
-            err.contains("effect 'Time.now_ms' is not allowed in durable steps"),
+            err.contains("effect 'Time.now_ms' is not allowed in durable replay surfaces"),
             "ambient Time via a helper fn must be rejected, got: {:?}",
             err
+        );
+    }
+
+    #[test]
+    fn test_durable_persistent_actor_behavior_rejects_ambient_time() {
+        // A persistent actor's behavior body re-runs on recovery replay;
+        // an ambient perform diverges exactly as in a workflow step.
+        let ast = parse_module(
+            r#"
+            persistent actor A {
+                state count: Int = 0
+                behavior tick() { perform Time.now_ms() }
+            }
+            "#,
+        );
+        let mut checker = EffectChecker::new();
+        let err = checker
+            .check_module(&ast.decls)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(
+            err.contains("behavior 'tick' of persistent actor 'A'")
+                && err.contains("effect 'Time.now_ms' is not allowed in durable replay surfaces"),
+            "ambient Time in a persistent actor behavior must be rejected, got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_durable_entity_apply_rejects_ambient_rand() {
+        // Entity apply handlers replay to rebuild state; ambient effects
+        // there diverge from the journaled event stream.
+        let ast = parse_module(
+            r#"
+            entity E {
+                state balance: Int = 0
+                events
+                    | Deposited(amount: Int)
+                apply
+                    | Deposited(amount) => perform Rand.int()
+                behavior get() { self.balance }
+            }
+            "#,
+        );
+        let mut checker = EffectChecker::new();
+        let err = checker
+            .check_module(&ast.decls)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(
+            err.contains("apply handler 'Deposited' of entity 'E'")
+                && err.contains("effect 'Rand.int' is not allowed in durable replay surfaces"),
+            "ambient Rand in an entity apply handler must be rejected, got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_nonpersistent_actor_behavior_allows_ambient_time() {
+        // Ordinary (non-persistent, non-entity) actors do not replay, so
+        // ambient effects stay legal there.
+        let ast = parse_module(
+            r#"
+            actor A {
+                state count: Int = 0
+                behavior tick() { perform Time.now_ms() }
+            }
+            "#,
+        );
+        let mut checker = EffectChecker::new();
+        assert!(
+            checker.check_module(&ast.decls).is_ok(),
+            "ambient Time in an ordinary actor must stay legal"
         );
     }
 

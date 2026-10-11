@@ -10,7 +10,7 @@
 //! ```c
 //! uint64_t nulang_fn_N(uint64_t arg0, uint64_t arg1, ...);
 //! ```
-//! All arguments and return values are `u64` (NaN-tagged when type is
+//! All arguments and return values are `u64` (canonical tagged words when type is
 //! unknown, raw bits when unboxed). The AOT runtime trampoline handles
 //! boxing/unboxing at function boundaries.
 
@@ -973,6 +973,22 @@ pub fn is_all_int(func: &mir::Function) -> bool {
             }
         }
     }
+    // Checked integer negation can fail at INT48_MIN. The runtime helper uses
+    // NaN-tagged values; an unboxed native entry point would silently wrap.
+    for block in &func.blocks {
+        for stmt in &block.stmts {
+            if matches!(
+                stmt,
+                mir::Stmt::Assign {
+                    op: mir::RValue::Unary(crate::ast::UnOp::Neg, _),
+                    ..
+                }
+            ) {
+                return false;
+            }
+        }
+    }
+
     // Nil-producing / heap-object operations must stay boxed. An unboxed
     // function tags its raw result, so a nil (div-by-zero, negative int-pow
     // exponent, out-of-bounds array access) would be re-tagged as int 0, and
@@ -1108,6 +1124,12 @@ pub fn compile_mir_function_body(
     let builder_ctx: &mut FunctionBuilderContext = aot.builder_context;
     let local_base = mir::FunctionBuilder::LOCAL_BASE;
     let type_meta = mir_func.type_metadata.clone();
+    // Static float-typedness, mirroring the bytecode compiler's `float_locals`
+    // opcode-selection analysis. The conservative `type_meta` marks nil-capable
+    // values Unknown, losing float-typedness (e.g. `1.0/0.0` → nil); AOT float
+    // arithmetic must still match the interpreter's statically-float `F*`
+    // opcode semantics (nil operand → 0.0), so select helpers from this too.
+    let float_typed = crate::mir_codegen::float_locals(mir_func);
     aot.cap_metadata = CapabilityMetadata::from_mir_function(mir_func);
 
     // Analyze block predecessors.
@@ -1150,6 +1172,10 @@ pub fn compile_mir_function_body(
             "nulang_fsub",
             "nulang_fmul",
             "nulang_fdiv",
+            "nulang_fmod",
+            "nulang_fadd_nil0",
+            "nulang_fsub_nil0",
+            "nulang_fmul_nil0",
             "nulang_fcmp_eq",
             "nulang_fcmp_lt",
             "nulang_fcmp_gt",
@@ -1182,6 +1208,7 @@ pub fn compile_mir_function_body(
             "nulang_itof",
             "nulang_ftoi",
             "nulang_fneg",
+            "nulang_ineg_nil0",
         ];
         for name in unary_helpers {
             let mut h_sig = module.make_signature();
@@ -1562,6 +1589,16 @@ pub fn compile_mir_function_body(
             let func_ref = module.declare_func_in_func(h_id, builder.func);
             h.insert("nulang_aot_spawn_push", func_ref);
         }
+        // spawn_grant_push: (i64) -> () (queue one canonical authority token)
+        {
+            let mut h_sig = module.make_signature();
+            h_sig.params.push(AbiParam::new(types::I64));
+            let h_id = module
+                .declare_function("nulang_aot_spawn_grant_push", Linkage::Import, &h_sig)
+                .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+            let func_ref = module.declare_func_in_func(h_id, builder.func);
+            h.insert("nulang_aot_spawn_grant_push", func_ref);
+        }
         // spawn: (i64) -> i64 (create a standalone actor)
         {
             let mut h_sig = module.make_signature();
@@ -1768,6 +1805,7 @@ pub fn compile_mir_function_body(
                     &mut builder,
                     stmt,
                     &type_meta,
+                    &float_typed,
                     &h,
                     &call_targets,
                     &mut closure_targets,
@@ -1885,6 +1923,120 @@ pub fn compile_boxing_wrapper(
     Ok(())
 }
 
+/// Generate the stable runtime-facing entry wrapper for an actor behavior.
+///
+/// Internal behavior functions keep their ordinary optimized signature
+/// (`fn(u64, ...) -> u64`). The scheduler calls only this wrapper, whose ABI
+/// is fixed to `NativeActorEntry`: a single `*mut NativeActorContext`
+/// parameter and a `NativeActorStatus` discriminant return value.
+pub fn compile_actor_entry_wrapper(
+    aot: &mut AotContext,
+    param_count: usize,
+    wrapper_fid: cranelift_module::FuncId,
+    behavior_fid: cranelift_module::FuncId,
+) -> AotResult<()> {
+    let module: &mut JITModule = aot.module;
+    let codegen_ctx: &mut codegen::Context = &mut aot.codegen_ctx;
+    let builder_ctx: &mut FunctionBuilderContext = aot.builder_context;
+    let pointer_type = module.isa().pointer_type();
+
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(pointer_type));
+    sig.returns.push(AbiParam::new(types::I32));
+    codegen_ctx.func.signature = sig;
+
+    let mut builder = FunctionBuilder::new(&mut codegen_ctx.func, builder_ctx);
+    let entry = builder.create_block();
+    let arity_check = builder.create_block();
+    let invoke = builder.create_block();
+    let bad_abi = builder.create_block();
+    let bad_arity = builder.create_block();
+
+    builder.switch_to_block(entry);
+    builder.append_block_params_for_function_params(entry);
+    let ctx_ptr = builder.block_params(entry)[0];
+    let flags = MemFlags::trusted();
+
+    let abi_offset =
+        std::mem::offset_of!(crate::native_abi::NativeActorContext, abi_version) as i32;
+    let abi_version = builder.ins().load(types::I32, flags, ctx_ptr, abi_offset);
+    let expected_abi = builder.ins().iconst(
+        types::I32,
+        crate::native_abi::NATIVE_ACTOR_ABI_VERSION as i64,
+    );
+    let abi_ok = builder.ins().icmp(IntCC::Equal, abi_version, expected_abi);
+    builder.ins().brif(abi_ok, arity_check, &[], bad_abi, &[]);
+
+    builder.switch_to_block(arity_check);
+    let payload_len_offset =
+        std::mem::offset_of!(crate::native_abi::NativeActorContext, payload_len) as i32;
+    let payload_len = builder
+        .ins()
+        .load(types::I64, flags, ctx_ptr, payload_len_offset);
+    let expected_len = builder.ins().iconst(types::I64, param_count as i64);
+    let arity_ok = builder.ins().icmp(IntCC::Equal, payload_len, expected_len);
+    builder.ins().brif(arity_ok, invoke, &[], bad_arity, &[]);
+
+    builder.switch_to_block(invoke);
+    let payload_ptr_offset =
+        std::mem::offset_of!(crate::native_abi::NativeActorContext, payload_ptr) as i32;
+    let payload_ptr = builder
+        .ins()
+        .load(pointer_type, flags, ctx_ptr, payload_ptr_offset);
+    let mut args = Vec::with_capacity(param_count);
+    for idx in 0..param_count {
+        args.push(
+            builder
+                .ins()
+                .load(types::I64, flags, payload_ptr, (idx * 8) as i32),
+        );
+    }
+
+    let behavior_ref = module.declare_func_in_func(behavior_fid, builder.func);
+    let call = builder.ins().call(behavior_ref, &args);
+    let result = builder.inst_results(call)[0];
+    let result_offset = std::mem::offset_of!(crate::native_abi::NativeActorContext, result) as i32;
+    builder.ins().store(flags, result, ctx_ptr, result_offset);
+    let completed = builder.ins().iconst(
+        types::I32,
+        crate::native_abi::NativeActorStatus::Completed as i64,
+    );
+    builder.ins().return_(&[completed]);
+
+    builder.switch_to_block(bad_abi);
+    builder.set_cold_block(bad_abi);
+    let status = builder.ins().iconst(
+        types::I32,
+        crate::native_abi::NativeActorStatus::AbiMismatch as i64,
+    );
+    builder.ins().return_(&[status]);
+
+    builder.switch_to_block(bad_arity);
+    builder.set_cold_block(bad_arity);
+    let status = builder.ins().iconst(
+        types::I32,
+        crate::native_abi::NativeActorStatus::BadArity as i64,
+    );
+    builder.ins().return_(&[status]);
+
+    builder.seal_all_blocks();
+    builder.finalize();
+
+    if std::env::var("NULANG_DUMP_CLIF").is_ok() {
+        eprintln!(
+            "=== CLIF for native actor entry wrapper ({}) ===",
+            param_count
+        );
+        eprintln!("{}", codegen_ctx.func.display());
+    }
+
+    module
+        .define_function(wrapper_fid, codegen_ctx)
+        .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+    module.clear_context(codegen_ctx);
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Statement compilation
 // ---------------------------------------------------------------------------
@@ -1893,6 +2045,7 @@ fn compile_stmt(
     builder: &mut FunctionBuilder,
     stmt: &mir::Stmt,
     type_meta: &TypeMetadata,
+    float_typed: &[bool],
     helpers: &HashMap<&str, FuncRef>,
     call_targets: &HashMap<usize, FuncRef>,
     closure_targets: &mut HashMap<u32, usize>,
@@ -1915,59 +2068,15 @@ fn compile_stmt(
 ) -> AotResult<()> {
     match stmt {
         mir::Stmt::Assign {
-            dst,
-            op: mir::RValue::ReceiveCommit,
-        } => {
-            // No-op in AOT: the standalone receive_match already removed the
-            // matched message from the mailbox.
-            let dst_reg = mir::FunctionBuilder::LOCAL_BASE + dst.0;
-            local_vals.insert(dst_reg, builder.ins().iconst(types::I64, 0));
-            Ok(())
-        }
-        mir::Stmt::Assign {
-            dst,
             op:
-                mir::RValue::ReceiveMatch {
-                    behavior_ids,
-                    max_params,
-                }
-                | mir::RValue::ReceiveWait {
-                    behavior_ids,
-                    max_params,
-                    ..
-                },
-        } => {
-            let helper_name = match behavior_ids.len() {
-                1 => "nulang_aot_receive_match_1",
-                2 => "nulang_aot_receive_match_2",
-                3 => "nulang_aot_receive_match_3",
-                4 => "nulang_aot_receive_match_4",
-                5 => "nulang_aot_receive_match_5",
-                6 => "nulang_aot_receive_match_6",
-                7 => "nulang_aot_receive_match_7",
-                8 => "nulang_aot_receive_match_8",
-                n => {
-                    return Err(AotCompileError::Unsupported(format!(
-                        "receive with {} candidate behaviors (max 8 in AOT)",
-                        n
-                    )))
-                }
-            };
-            let call_args: Vec<Value> = behavior_ids
-                .iter()
-                .map(|id| builder.ins().iconst(types::I64, *id as i64))
-                .collect();
-            let arm_val = call_helper(builder, helpers, helper_name, &call_args)?;
-            let dst_reg = mir::FunctionBuilder::LOCAL_BASE + dst.0;
-            local_vals.insert(dst_reg, arm_val);
-            // Payload temps are the contiguous locals dst+1 .. dst+max_params.
-            for i in 0..*max_params {
-                let idx_const = builder.ins().iconst(types::I64, i as i64);
-                let pv = call_helper(builder, helpers, "nulang_aot_receive_payload", &[idx_const])?;
-                local_vals.insert(dst_reg + 1 + i as u32, pv);
-            }
-            Ok(())
-        }
+                mir::RValue::ReceiveCommit
+                | mir::RValue::ReceiveMatch { .. }
+                | mir::RValue::ReceiveWait { .. },
+            ..
+        } => Err(AotCompileError::Unsupported(
+            "selective receive transactions require the bytecode backend (unavailable with --backend native)"
+                .into(),
+        )),
         mir::Stmt::Assign { dst, op } => {
             // Resuming PerformDirect: an effect with a statically-resolved,
             // resuming handler compiles as intra-function continuation. The
@@ -2164,6 +2273,7 @@ fn compile_stmt(
                 builder,
                 op,
                 type_meta,
+                float_typed,
                 helpers,
                 call_targets,
                 closure_targets,
@@ -2178,10 +2288,11 @@ fn compile_stmt(
             local_vals.insert(reg, val);
             Ok(())
         }
-        mir::Stmt::EnterHandle { .. } | mir::Stmt::PopHandler => {
-            // Handler tables and the handler stack are a runtime (VM)
-            // concept — at the AOT level these are no-ops.  The handler
-            // body is compiled inline as ordinary blocks.
+        mir::Stmt::EnterHandle { .. }
+        | mir::Stmt::PopHandler
+        | mir::Stmt::ParallelMarker { .. } => {
+            // Handler tables and parallel-region markers are compile-time /
+            // VM metadata at this backend boundary and emit no native code.
             Ok(())
         }
         mir::Stmt::StoreFieldNamed { obj, field, src } => {
@@ -2290,6 +2401,7 @@ fn compile_rvalue(
     builder: &mut FunctionBuilder,
     rv: &mir::RValue,
     type_meta: &TypeMetadata,
+    float_typed: &[bool],
     helpers: &HashMap<&str, FuncRef>,
     call_targets: &HashMap<usize, FuncRef>,
     closure_targets: &mut HashMap<u32, usize>,
@@ -2314,11 +2426,11 @@ fn compile_rvalue(
                 .ok_or_else(|| AotCompileError::Internal(format!("uninitialized local {}", id.0)))
         }
         mir::RValue::Binary(op, lhs, rhs) => compile_binary(
-            builder, *op, *lhs, *rhs, type_meta, helpers, local_vals, mode,
+            builder, *op, *lhs, *rhs, type_meta, float_typed, helpers, local_vals, mode,
         ),
 
         mir::RValue::Unary(op, operand) => {
-            compile_unary(builder, *op, *operand, type_meta, helpers, local_vals, mode)
+            compile_unary(builder, *op, *operand, type_meta, float_typed, helpers, local_vals, mode)
         }
 
         mir::RValue::Call { func, args } => {
@@ -2399,50 +2511,48 @@ fn compile_rvalue(
         }
 
         mir::RValue::Closure { func, captures } => {
-            if captures.is_empty() {
-                // Return tagged function index — also register for call resolution.
-                let idx = builder.ins().iconst(types::I64, *func as i64);
-                Ok(emit_tag_int(builder, idx))
-            } else {
-                // Allocate a closure object carrying the captured values and
-                // return it as a TAG_CLOSURE value. The lifted target function
-                // receives the captures as trailing params when dispatched.
-                let fn_val = builder.ins().iconst(types::I64, *func as i64);
-                let cap_vals: Vec<Value> =
-                    captures
-                        .iter()
-                        .map(|id| {
-                            let reg = mir::FunctionBuilder::LOCAL_BASE + id.0;
-                            local_vals.get(&reg).copied().ok_or_else(|| {
-                                AotCompileError::Internal(format!(
-                                    "closure capture local {} uninitialized",
-                                    id.0
-                                ))
-                            })
+            // All closures — including uncaptured ones — materialize as a
+            // TAG_CLOSURE heap object, matching the interpreter's `Closure`
+            // opcode (`Value::closure` + `CapStore`, and the runtime neg/mul/
+            // compare helpers dispatch on the tag). A bare `TAG_INT(fn_index)`
+            // for uncaptured closures made them indistinguishable from a real
+            // Int: `nulang_ineg` negated the index (`-fn(x,y){x+y}` → `-1`)
+            // instead of raising the interpreter's type error.
+            let fn_val = builder.ins().iconst(types::I64, *func as i64);
+            let cap_vals: Vec<Value> =
+                captures
+                    .iter()
+                    .map(|id| {
+                        let reg = mir::FunctionBuilder::LOCAL_BASE + id.0;
+                        local_vals.get(&reg).copied().ok_or_else(|| {
+                            AotCompileError::Internal(format!(
+                                "closure capture local {} uninitialized",
+                                id.0
+                            ))
                         })
-                        .collect::<AotResult<Vec<_>>>()?;
-                let helper_name = match cap_vals.len() {
-                    0 => "nulang_aot_make_closure_0",
-                    1 => "nulang_aot_make_closure_1",
-                    2 => "nulang_aot_make_closure_2",
-                    3 => "nulang_aot_make_closure_3",
-                    4 => "nulang_aot_make_closure_4",
-                    5 => "nulang_aot_make_closure_5",
-                    6 => "nulang_aot_make_closure_6",
-                    7 => "nulang_aot_make_closure_7",
-                    8 => "nulang_aot_make_closure_8",
-                    n => {
-                        return Err(AotCompileError::Unsupported(format!(
-                            "closure with {} captures (max 8 in AOT)",
-                            n
-                        )))
-                    }
-                };
-                let mut call_args = Vec::with_capacity(cap_vals.len() + 1);
-                call_args.push(fn_val);
-                call_args.extend(cap_vals);
-                call_helper(builder, helpers, helper_name, &call_args)
-            }
+                    })
+                    .collect::<AotResult<Vec<_>>>()?;
+            let helper_name = match cap_vals.len() {
+                0 => "nulang_aot_make_closure_0",
+                1 => "nulang_aot_make_closure_1",
+                2 => "nulang_aot_make_closure_2",
+                3 => "nulang_aot_make_closure_3",
+                4 => "nulang_aot_make_closure_4",
+                5 => "nulang_aot_make_closure_5",
+                6 => "nulang_aot_make_closure_6",
+                7 => "nulang_aot_make_closure_7",
+                8 => "nulang_aot_make_closure_8",
+                n => {
+                    return Err(AotCompileError::Unsupported(format!(
+                        "closure with {} captures (max 8 in AOT)",
+                        n
+                    )))
+                }
+            };
+            let mut call_args = Vec::with_capacity(cap_vals.len() + 1);
+            call_args.push(fn_val);
+            call_args.extend(cap_vals);
+            call_helper(builder, helpers, helper_name, &call_args)
         }
 
         mir::RValue::Perform {
@@ -2914,7 +3024,7 @@ fn compile_rvalue(
             behavior_idx,
             init,
             target_node,
-            capabilities: _,
+            capabilities,
         } => {
             if target_node.is_some() {
                 return Err(AotCompileError::Unsupported(
@@ -2932,6 +3042,7 @@ fn compile_rvalue(
                     builder,
                     val_rv,
                     type_meta,
+                    &[],
                     helpers,
                     call_targets,
                     closure_targets,
@@ -2944,6 +3055,28 @@ fn compile_rvalue(
                 )?;
                 let name_val = builder.ins().iconst(types::I64, name_idx);
                 call_void_helper(builder, helpers, "nulang_aot_spawn_push", &[name_val, val])?;
+            }
+            let manifest = crate::authority::AuthorityManifest::from_tokens(
+                capabilities.iter().map(String::as_str),
+            )
+            .map_err(|err| {
+                AotCompileError::Internal(format!(
+                    "invalid spawn authority grant in native backend: {err}"
+                ))
+            })?;
+            for token in manifest.canonical_tokens() {
+                let token_val = compile_const(
+                    builder,
+                    &crate::bytecode::Constant::String(token),
+                    mode,
+                    constants,
+                )?;
+                call_void_helper(
+                    builder,
+                    helpers,
+                    "nulang_aot_spawn_grant_push",
+                    &[token_val],
+                )?;
             }
             let behavior_val = builder.ins().iconst(types::I64, *behavior_idx as i64);
             call_helper(builder, helpers, "nulang_aot_spawn", &[behavior_val])
@@ -3095,6 +3228,7 @@ fn compile_binary(
     lhs: mir::LocalId,
     rhs: mir::LocalId,
     type_meta: &TypeMetadata,
+    float_typed: &[bool],
     helpers: &HashMap<&str, FuncRef>,
     local_vals: &HashMap<u32, Value>,
     mode: CompileMode,
@@ -3176,12 +3310,32 @@ fn compile_binary(
                     Ok(emit_tag_int(builder, sum))
                 }
             } else if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Float) {
-                let l = builder.ins().bitcast(types::F64, MemFlags::new(), lhs_val);
-                let r = builder.ins().bitcast(types::F64, MemFlags::new(), rhs_val);
-                let sum = builder.ins().fadd(l, r);
-                Ok(builder.ins().bitcast(types::I64, MemFlags::new(), sum))
+                if mode == CompileMode::Unboxed {
+                    Ok(builder.ins().iadd(lhs_val, rhs_val))
+                } else {
+                    // Statically float-typed op. The interpreter's FAdd coerces
+                    // a runtime nil operand to 0.0 (`as_float().unwrap_or(0.0)`),
+                    // e.g. a nil division-by-zero: `0.1 + (1.0/0.0)` → 0.1. The
+                    // inline `bitcast + fadd` would misread a nil tag as float
+                    // bits, so route through the nil-coercing helper.
+                    call_helper(builder, helpers, "nulang_fadd_nil0", &[lhs_val, rhs_val])
+                }
+            } else if float_typed[lhs.0 as usize] || float_typed[rhs.0 as usize] {
+                // Statically a float op (bytecode emits FAdd), but a runtime
+                // operand may be nil (e.g. `0.1 + (1.0/0.0)` → `0.1 + nil`,
+                // computed as 0.1 by FAdd's nil→0.0 coercion). `type_meta` is
+                // conservative here because nil-capable operands are Unknown;
+                // route through the float-coercing helper to match FAdd.
+                if mode == CompileMode::Unboxed {
+                    return Err(AotCompileError::Internal(
+                        "statically-float Add reached unboxed AOT codegen".into(),
+                    ));
+                }
+                call_helper(builder, helpers, "nulang_fadd_nil0", &[lhs_val, rhs_val])
             } else {
-                // Fall back to runtime helper.
+                // Fall back to runtime helper. Only float when BOTH are float
+                // (matching the interpreter's IAdd); a lone float is coerced
+                // to an int, exactly as the bytecode IAdd would.
                 call_helper(builder, helpers, "nulang_iadd", &[lhs_val, rhs_val])
             }
         }
@@ -3196,10 +3350,18 @@ fn compile_binary(
                     Ok(emit_tag_int(builder, diff))
                 }
             } else if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Float) {
-                let l = builder.ins().bitcast(types::F64, MemFlags::new(), lhs_val);
-                let r = builder.ins().bitcast(types::F64, MemFlags::new(), rhs_val);
-                let diff = builder.ins().fsub(l, r);
-                Ok(builder.ins().bitcast(types::I64, MemFlags::new(), diff))
+                if mode == CompileMode::Unboxed {
+                    Ok(builder.ins().isub(lhs_val, rhs_val))
+                } else {
+                    call_helper(builder, helpers, "nulang_fsub_nil0", &[lhs_val, rhs_val])
+                }
+            } else if float_typed[lhs.0 as usize] || float_typed[rhs.0 as usize] {
+                if mode == CompileMode::Unboxed {
+                    return Err(AotCompileError::Internal(
+                        "statically-float Sub reached unboxed AOT codegen".into(),
+                    ));
+                }
+                call_helper(builder, helpers, "nulang_fsub_nil0", &[lhs_val, rhs_val])
             } else {
                 call_helper(builder, helpers, "nulang_isub", &[lhs_val, rhs_val])
             }
@@ -3215,26 +3377,41 @@ fn compile_binary(
                     Ok(emit_tag_int(builder, prod))
                 }
             } else if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Float) {
-                let l = builder.ins().bitcast(types::F64, MemFlags::new(), lhs_val);
-                let r = builder.ins().bitcast(types::F64, MemFlags::new(), rhs_val);
-                let prod = builder.ins().fmul(l, r);
-                Ok(builder.ins().bitcast(types::I64, MemFlags::new(), prod))
+                if mode == CompileMode::Unboxed {
+                    Ok(builder.ins().imul(lhs_val, rhs_val))
+                } else {
+                    call_helper(builder, helpers, "nulang_fmul_nil0", &[lhs_val, rhs_val])
+                }
+            } else if float_typed[lhs.0 as usize] || float_typed[rhs.0 as usize] {
+                if mode == CompileMode::Unboxed {
+                    return Err(AotCompileError::Internal(
+                        "statically-float Mul reached unboxed AOT codegen".into(),
+                    ));
+                }
+                call_helper(builder, helpers, "nulang_fmul_nil0", &[lhs_val, rhs_val])
             } else {
                 call_helper(builder, helpers, "nulang_imul", &[lhs_val, rhs_val])
             }
         }
         BinOp::Div => {
-            // Route through `nulang_idiv` ALWAYS (not just for unknown/float
-            // operands): it checks for a zero divisor BEFORE dividing and
-            // returns nil, matching the interpreter. The old inline `sdiv` +
-            // `select` computed the division unconditionally, so a zero
-            // divisor TRAPPED (SIGILL) before the select could return nil.
-            call_helper(builder, helpers, "nulang_idiv", &[lhs_val, rhs_val])
+            // Route through the integer div helper UNLESS this is a
+            // statically-float op: FDiv (bytecode) coerces a runtime nil
+            // operand to 0.0 (`1.0/0.0` → nil on the zero divisor; `nil/2.0`
+            // → 0.0). `nulang_idiv` only does float math when BOTH operands
+            // are float, so route statically-float div through `nulang_fdiv`
+            // which the served nil→0.0 already matches.
+            if float_typed[lhs.0 as usize] || float_typed[rhs.0 as usize] {
+                call_helper(builder, helpers, "nulang_fdiv", &[lhs_val, rhs_val])
+            } else {
+                call_helper(builder, helpers, "nulang_idiv", &[lhs_val, rhs_val])
+            }
         }
         BinOp::Mod => {
-            // Route through `nulang_imod` always for the same reason: `srem`
-            // by zero traps, so the division must be guarded in the helper.
-            call_helper(builder, helpers, "nulang_imod", &[lhs_val, rhs_val])
+            if float_typed[lhs.0 as usize] || float_typed[rhs.0 as usize] {
+                call_helper(builder, helpers, "nulang_fmod", &[lhs_val, rhs_val])
+            } else {
+                call_helper(builder, helpers, "nulang_imod", &[lhs_val, rhs_val])
+            }
         }
         BinOp::Eq => {
             if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
@@ -3422,7 +3599,8 @@ fn compile_unary(
     builder: &mut FunctionBuilder,
     op: crate::ast::UnOp,
     operand: mir::LocalId,
-    type_meta: &TypeMetadata,
+    _type_meta: &TypeMetadata,
+    float_typed: &[bool],
     helpers: &HashMap<&str, FuncRef>,
     local_vals: &HashMap<u32, Value>,
     mode: CompileMode,
@@ -3435,18 +3613,16 @@ fn compile_unary(
     use crate::ast::UnOp;
     match op {
         UnOp::Neg => {
-            if type_meta.is_known(reg as usize, KnownType::Int) {
-                if mode == CompileMode::Unboxed {
-                    Ok(builder.ins().ineg(val))
-                } else {
-                    let payload = emit_sext48(builder, val);
-                    let neg = builder.ins().ineg(payload);
-                    Ok(emit_tag_int(builder, neg))
-                }
-            } else if type_meta.is_known(reg as usize, KnownType::Float) {
-                let f = builder.ins().bitcast(types::F64, MemFlags::new(), val);
-                let neg = builder.ins().fneg(f);
-                Ok(builder.ins().bitcast(types::I64, MemFlags::new(), neg))
+            // Negation can fail dynamically even when source inference says Int.
+            // Every boxed path therefore goes through a checked runtime helper.
+            if mode == CompileMode::Unboxed {
+                return Err(AotCompileError::Internal(
+                    "checked Neg reached unboxed AOT codegen".into(),
+                ));
+            }
+            if float_typed[operand.0 as usize] {
+                // FNeg coerces runtime nil to 0.0, unlike checked integer negation.
+                call_helper(builder, helpers, "nulang_ineg_nil0", &[val])
             } else {
                 call_helper(builder, helpers, "nulang_ineg", &[val])
             }
@@ -3457,7 +3633,6 @@ fn compile_unary(
     }
 }
 
-/// Call a runtime helper function by name.
 fn call_helper(
     builder: &mut FunctionBuilder,
     helpers: &HashMap<&str, FuncRef>,
@@ -3542,6 +3717,45 @@ mod tests {
         builder.terminate(mir::Terminator::Return(Some(tmp)));
         let func = builder.build();
         assert!(is_all_int(&func));
+    }
+
+    #[test]
+    fn test_is_all_int_false_with_checked_negation() {
+        let mut builder = mir::FunctionBuilder::new("checked_neg", Some(crate::types::Type::int()));
+        let x = builder.add_param("x", crate::types::Type::int());
+        let neg = builder.add_temp(crate::types::Type::int());
+        builder.assign(neg, mir::RValue::Unary(crate::ast::UnOp::Neg, x));
+        builder.terminate(mir::Terminator::Return(Some(neg)));
+        assert!(
+            !is_all_int(&builder.build()),
+            "checked Neg cannot use an unboxed native entry point"
+        );
+    }
+
+    #[test]
+    fn test_aot_checked_neg_int48_min_overflow() {
+        let mut builder = mir::FunctionBuilder::new("__main", Some(crate::types::Type::int()));
+        let x = builder.add_temp(crate::types::Type::int());
+        builder.assign(
+            x,
+            mir::RValue::Const(crate::bytecode::Constant::Int(
+                crate::value_layout::INT48_MIN,
+            )),
+        );
+        let neg = builder.add_temp(crate::types::Type::int());
+        builder.assign(neg, mir::RValue::Unary(crate::ast::UnOp::Neg, x));
+        builder.terminate(mir::Terminator::Return(Some(neg)));
+        let mut module = mir::Module::new("checked_neg");
+        module.functions.push(builder.build());
+
+        let aot = crate::aot::AotModule::compile(&module).expect("AOT compile");
+        let err = aot
+            .run()
+            .expect_err("negating INT48_MIN must not silently wrap");
+        assert!(
+            err.to_string().contains("integer overflow"),
+            "unexpected native error: {err}"
+        );
     }
 
     #[test]
@@ -3643,11 +3857,26 @@ mod tests {
         let ptr = aot
             .fn_ptr_for_behavior("Doubler.double")
             .expect("behavior 'double' should be compiled");
-        // Boxed calling convention: extern "C" fn(u64) -> u64.
-        let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(ptr) };
-        let result = f(crate::vm::Value::int(21).as_raw());
-        let got = crate::vm::Value::from_bits(result).as_int();
+        let payload = [crate::vm::Value::int(21).as_raw()];
+        let mut ctx = crate::native_abi::NativeActorContext::new(0, &payload);
+        let entry: crate::native_abi::NativeActorEntry = unsafe { std::mem::transmute(ptr) };
+        let status = unsafe { entry(&mut ctx) };
+        assert_eq!(
+            crate::native_abi::NativeActorStatus::from_raw(status),
+            Some(crate::native_abi::NativeActorStatus::Completed)
+        );
+        let got = unsafe { crate::vm::Value::from_bits(ctx.result) }.as_int();
         assert_eq!(got, Some(42));
+
+        // The wrapper rejects malformed deliveries before calling the
+        // arity-specific internal function, avoiding an ABI mismatch/UB.
+        let empty: [u64; 0] = [];
+        let mut bad_ctx = crate::native_abi::NativeActorContext::new(0, &empty);
+        let status = unsafe { entry(&mut bad_ctx) };
+        assert_eq!(
+            crate::native_abi::NativeActorStatus::from_raw(status),
+            Some(crate::native_abi::NativeActorStatus::BadArity)
+        );
     }
 
     #[test]
@@ -3790,14 +4019,12 @@ mod tests {
     }
 
     #[test]
-    fn test_aot_native_receive() {
-        // Selective receive in native code: Run() executes a `receive` that
-        // pops a queued Add(5) from the actor's mailbox, binds n, and
-        // accumulates it — all through AOT-compiled code + callbacks.
+    fn test_aot_native_selective_receive_fails_closed() {
         use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
         use crate::lexer::Lexer;
         use crate::parser::Parser;
         use crate::typechecker::TypeChecker;
+
         let source = r#"
             actor Counter {
                 state total: Int = 0
@@ -3821,37 +4048,16 @@ mod tests {
         }
         let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
-        let aot = crate::aot::AotModule::compile(&mir_module)
-            .expect("AOT compile of receive behavior should succeed");
-        let run = aot
-            .fn_ptr_for_behavior("Counter.Run")
-            .expect("behavior 'Counter.Run' should be compiled");
-
-        let mut c = crate::runtime::Actor::new(1, "Counter", 64);
-        c.set_state_field("total", crate::vm::Value::int(0));
-        c.register_behavior("Add", crate::aot::aot_behavior_adapter);
-        c.register_behavior("Run", crate::aot::aot_behavior_adapter);
-        crate::aot::register_aot_actor(&mut c);
-
-        // Queue an Add(5) message (behavior_id 0 = module index of Add).
-        let _ = c.mailbox.push_local(crate::runtime::Message {
-            behavior_id: 0,
-            payload: std::sync::Arc::new(vec![crate::vm::Value::int(5)]),
-            sender: 0,
-            priority: crate::runtime::MessagePriority::Normal,
-            trace_id: None,
-        });
-
-        // Dispatch Run(): its native body selectively receives the message.
-        crate::aot::set_aot_dispatch(Some(crate::aot::AotDispatchTarget::standalone(run, &aot)));
-        (c.behavior_table[1].handler_fn)(&mut c, &[]);
-
-        let total = c.get_state_field("total").and_then(|v| v.as_int());
-        assert_eq!(total, Some(5), "native receive must deliver the payload");
-
-        crate::aot::unregister_aot_actor(1);
+        let err = match crate::aot::AotModule::compile(&mir_module) {
+            Ok(_) => panic!("native AOT must reject transactional selective receive"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            err.contains("selective receive transactions require the bytecode backend"),
+            "native AOT must fail closed instead of changing receive semantics, got: {}",
+            err
+        );
     }
-
     #[test]
     fn test_aot_native_spawn() {
         // Spawn in native code: Factory.make(base) runs `spawn Counter {
@@ -3928,11 +4134,11 @@ mod tests {
 
     #[test]
     fn test_aot_runtime_native_dispatch() {
-        // Phase 3: the real actor `Runtime` dispatches a spawned actor's
-        // behavior through AOT native code. A `Counter` actor spawned from a
-        // CodeModule whose AotModule is registered must run `Add` natively
-        // (handler = aot_behavior_adapter, target armed) and mutate state
-        // through `AotRuntimeCallbacks` routing to the Runtime.
+        // The real actor Runtime dispatches a spawned actor's behavior
+        // directly through the stable AOT actor-entry ABI. The behavior table
+        // keeps the compatibility adapter for standalone/legacy callers, but
+        // Runtime dispatch uses the per-behavior AOT target directly and
+        // mutates state through AotRuntimeCallbacks.
         use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
         use crate::lexer::Lexer;
         use crate::parser::Parser;
@@ -3971,8 +4177,8 @@ mod tests {
             .as_actor_id()
             .expect("spawn should return an actor ref");
 
-        // The Add behavior must dispatch through the AOT adapter with an armed
-        // target (proving native wiring, not bytecode).
+        // The behavior table retains the compatibility adapter while the
+        // runtime-owned AOT target proves native wiring is available.
         {
             let actor = rt.actors.get(&id).expect("spawned actor");
             assert_eq!(actor.behavior_table.len(), 2, "both behaviors registered");
@@ -3981,7 +4187,7 @@ mod tests {
                     == crate::aot::aot_behavior_adapter
                         as fn(&mut crate::runtime::Actor, &[crate::vm::Value])
                         as usize,
-                "Add should dispatch through the AOT adapter"
+                "Add should retain the AOT compatibility adapter"
             );
             assert!(
                 actor.aot_targets[0].is_some(),
@@ -4003,6 +4209,23 @@ mod tests {
             total,
             Some(5),
             "AOT-native Add should mutate state through the Runtime"
+        );
+
+        // Queue one native message, then issue a synchronous native ask.
+        // ask_actor_sync first flushes the mailbox, so this exercises both
+        // non-scheduler runtime entry points without arming AOT_DISPATCH.
+        rt.send_message_by_id(id, 0, &[crate::vm::Value::int(2)]);
+        rt.ask_actor_sync(id, 0, &[crate::vm::Value::int(3)])
+            .expect("direct AOT sync dispatch should succeed");
+        let total = rt
+            .actors
+            .get(&id)
+            .and_then(|a| a.get_state_field("total"))
+            .and_then(|v| v.as_int());
+        assert_eq!(
+            total,
+            Some(10),
+            "queued flush plus sync AOT dispatch must both use the direct native path"
         );
     }
 
@@ -4257,7 +4480,7 @@ mod tests {
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
         let raw = aot.run().expect("native run");
         assert_eq!(
-            crate::vm::Value::from_raw(raw).as_int(),
+            unsafe { crate::vm::Value::from_raw(raw) }.as_int(),
             Some(5),
             "abortive handle without a perform evaluates to the body value"
         );
@@ -4300,7 +4523,7 @@ mod tests {
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
         let raw = aot.run().expect("native run");
         assert_eq!(
-            crate::vm::Value::from_raw(raw).as_int(),
+            unsafe { crate::vm::Value::from_raw(raw) }.as_int(),
             Some(42),
             "resuming handler must deliver 41 then continue with a+1"
         );
@@ -4343,7 +4566,7 @@ mod tests {
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
         let raw = aot.run().expect("native run");
         assert_eq!(
-            crate::vm::Value::from_raw(raw).as_int(),
+            unsafe { crate::vm::Value::from_raw(raw) }.as_int(),
             Some(12),
             "handler param x must receive 5, resume 6, then a*2 = 12"
         );
@@ -4387,7 +4610,7 @@ mod tests {
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
         let raw = aot.run().expect("native run");
         assert_eq!(
-            crate::vm::Value::from_raw(raw).as_int(),
+            unsafe { crate::vm::Value::from_raw(raw) }.as_int(),
             Some(107),
             "abortive handler must receive x = 7 and yield 7 + 100 = 107 (post-perform code is dead)"
         );
@@ -4429,7 +4652,7 @@ mod tests {
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
         let raw = aot.run().expect("native run");
         assert_eq!(
-            crate::vm::Value::from_raw(raw).as_int(),
+            unsafe { crate::vm::Value::from_raw(raw) }.as_int(),
             Some(99),
             "abortive handler with no args must yield the handler body result"
         );
@@ -4503,7 +4726,9 @@ mod tests {
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
         let raw = aot.run().expect("handled nil effect must not error");
         assert!(
-            crate::vm::Value::from_raw(raw).is_nil(),
+            // SAFETY: `raw` is produced by the in-process AOT module using
+            // the same Value ABI; this assertion only inspects the nil tag.
+            unsafe { crate::vm::Value::from_raw(raw) }.is_nil(),
             "Actor.link outside an actor must nil-no-op like the interpreter"
         );
     }
@@ -4546,13 +4771,13 @@ mod tests {
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
         let raw = aot.run().expect("native run");
         assert_eq!(
-            crate::vm::Value::from_raw(raw).as_int(),
+            unsafe { crate::vm::Value::from_raw(raw) }.as_int(),
             Some(23),
             "a = 1+10 = 11, b = 2+10 = 12, a+b = 23"
         );
     }
 
-    fn aot_compile_source(source: &str) -> crate::aot::AotModule {
+    fn compile_source_mir(source: &str) -> crate::mir::Module {
         use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
         use crate::lexer::Lexer;
         use crate::parser::Parser;
@@ -4571,7 +4796,11 @@ mod tests {
             }
         }
         let hir = crate::hir_lower::lower_module(&ast, &tc.inferred_decl_types);
-        let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
+        crate::mir_lower::lower_module(&hir).unwrap()
+    }
+
+    fn aot_compile_source(source: &str) -> crate::aot::AotModule {
+        let mir_module = compile_source_mir(source);
         crate::aot::AotModule::compile(&mir_module).expect("AOT compile")
     }
 
@@ -4594,7 +4823,7 @@ mod tests {
         );
         let raw = aot.run().expect("native run");
         assert_eq!(
-            crate::vm::Value::from_raw(raw).as_int(),
+            unsafe { crate::vm::Value::from_raw(raw) }.as_int(),
             Some(23),
             "f(true)=1+10=11, f(false)=2+10=12, sum=23"
         );
@@ -4621,7 +4850,7 @@ mod tests {
         );
         let raw = aot.run().expect("native run");
         assert_eq!(
-            crate::vm::Value::from_raw(raw).as_int(),
+            unsafe { crate::vm::Value::from_raw(raw) }.as_int(),
             Some(24),
             "f(true)=2+10=12, f(false)=2+10=12, sum=24"
         );
@@ -4641,7 +4870,7 @@ mod tests {
         );
         let raw = aot.run().expect("native run");
         assert_eq!(
-            crate::vm::Value::from_raw(raw).as_int(),
+            unsafe { crate::vm::Value::from_raw(raw) }.as_int(),
             Some(2),
             "array indexing must work"
         );
@@ -4659,7 +4888,7 @@ mod tests {
         );
         let raw = aot.run().expect("native run");
         assert_eq!(
-            crate::vm::Value::from_raw(raw).as_float(),
+            unsafe { crate::vm::Value::from_raw(raw) }.as_float(),
             Some(9.8596),
             "3.14 ** 2.0 must be a float pow"
         );
@@ -4667,7 +4896,7 @@ mod tests {
         let aot = aot_compile_source(r#"fn main() -> Int { 1000000000 ** 1000000000 }"#);
         let raw = aot.run().expect("native run");
         assert_eq!(
-            crate::vm::Value::from_raw(raw).as_int(),
+            unsafe { crate::vm::Value::from_raw(raw) }.as_int(),
             Some(0),
             "int pow overflow wraps (wrapping_mul), not nil"
         );
@@ -4685,7 +4914,7 @@ mod tests {
         let aot = aot_compile_source(r#"fn main() -> Int { 3 ** 3 }"#);
         let raw = aot.run().expect("native run");
         assert_eq!(
-            crate::vm::Value::from_raw(raw).as_int(),
+            unsafe { crate::vm::Value::from_raw(raw) }.as_int(),
             Some(27),
             "3 ** 3 must be 27, not 0 (unboxed-pow hazard)"
         );
@@ -4694,7 +4923,7 @@ mod tests {
         let aot = aot_compile_source(r#"fn main() -> Int { 2 ** 10 }"#);
         let raw = aot.run().expect("native run");
         assert_eq!(
-            crate::vm::Value::from_raw(raw).as_int(),
+            unsafe { crate::vm::Value::from_raw(raw) }.as_int(),
             Some(1024),
             "2 ** 10 must be 1024"
         );
@@ -4704,7 +4933,7 @@ mod tests {
         let aot = aot_compile_source(r#"fn main() -> Int { 3 ** -1 }"#);
         let raw = aot.run().expect("native run");
         assert_eq!(
-            crate::vm::Value::from_raw(raw),
+            unsafe { crate::vm::Value::from_raw(raw) },
             crate::vm::Value::nil(),
             "3 ** -1 must be nil, not int 0"
         );
@@ -4720,7 +4949,7 @@ mod tests {
         let aot = aot_compile_source(r#"fn main() -> Float { -(0.1 + 0.22) }"#);
         let raw = aot.run().expect("native run");
         assert_eq!(
-            crate::vm::Value::from_raw(raw).as_float(),
+            unsafe { crate::vm::Value::from_raw(raw) }.as_float(),
             Some(-0.32),
             "neg of literal float sum"
         );
@@ -4729,7 +4958,7 @@ mod tests {
             aot_compile_source(r#"fn main() -> Float { let x = 0.1; let y = 0.2; -(x + y) }"#);
         let raw = aot.run().expect("native run");
         assert_eq!(
-            crate::vm::Value::from_raw(raw).as_float(),
+            unsafe { crate::vm::Value::from_raw(raw) }.as_float(),
             Some(-0.30000000000000004),
             "neg of float sum through vars"
         );
@@ -4745,10 +4974,16 @@ mod tests {
         // the top level (boxed entry).
         let aot = aot_compile_source(r#"fn main() { 1 / 0 }"#);
         let raw = aot.run().expect("native run");
-        assert!(crate::vm::Value::from_raw(raw).is_nil(), "1/0 must be nil");
+        assert!(
+            unsafe { crate::vm::Value::from_raw(raw) }.is_nil(),
+            "1/0 must be nil"
+        );
         let aot = aot_compile_source(r#"fn f() -> Int { 1 % 0 } fn main() { f() }"#);
         let raw = aot.run().expect("native run");
-        assert!(crate::vm::Value::from_raw(raw).is_nil(), "1%0 must be nil");
+        assert!(
+            unsafe { crate::vm::Value::from_raw(raw) }.is_nil(),
+            "1%0 must be nil"
+        );
     }
 
     #[test]
@@ -4771,7 +5006,7 @@ mod tests {
         );
         let raw = aot.run().expect("native run");
         assert_eq!(
-            crate::vm::Value::from_raw(raw).as_int(),
+            unsafe { crate::vm::Value::from_raw(raw) }.as_int(),
             Some(11),
             "f(true)=1+5=6, f(false)=0+5=5, sum=11"
         );
@@ -4802,7 +5037,7 @@ mod tests {
         );
         let raw = aot.run().expect("native run");
         assert_eq!(
-            crate::vm::Value::from_raw(raw).as_int(),
+            unsafe { crate::vm::Value::from_raw(raw) }.as_int(),
             Some(35),
             "f(true)=11+12=23, f(false)=0+12=12, sum=35"
         );
@@ -4834,7 +5069,7 @@ mod tests {
         );
         let raw = aot.run().expect("native run");
         assert_eq!(
-            crate::vm::Value::from_raw(raw).as_int(),
+            unsafe { crate::vm::Value::from_raw(raw) }.as_int(),
             Some(3),
             "loop: acc 0->1->2->3 = 3"
         );
@@ -5094,7 +5329,7 @@ mod tests {
         let aot = aot_compile_source(r#"fn mix(x, y) { x + y * 2 }"#);
         let raw = aot.run().expect("native run");
         assert!(
-            crate::vm::Value::from_raw(raw).is_nil(),
+            unsafe { crate::vm::Value::from_raw(raw) }.is_nil(),
             "library module must run to nil"
         );
     }
@@ -5123,7 +5358,7 @@ mod tests {
         };
         let aot = crate::aot::AotModule::compile(&module).expect("AOT compile");
         let raw = aot.run().expect("native run");
-        let val = crate::vm::Value::from_raw(raw);
+        let val = unsafe { crate::vm::Value::from_raw(raw) };
         assert_eq!(
             val,
             crate::vm::Value::bool(true),
@@ -5185,7 +5420,7 @@ mod tests {
         };
         let aot = crate::aot::AotModule::compile(&module).expect("AOT compile");
         let raw = aot.run().expect("native run");
-        let val = crate::vm::Value::from_raw(raw);
+        let val = unsafe { crate::vm::Value::from_raw(raw) };
         assert_eq!(
             val.as_int(),
             Some(42),
@@ -5221,7 +5456,7 @@ mod tests {
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
         let raw = aot.run().expect("native run");
-        let val = crate::vm::Value::from_raw(raw);
+        let val = unsafe { crate::vm::Value::from_raw(raw) };
         assert_eq!(
             val.as_int(),
             Some(42),
@@ -5255,7 +5490,7 @@ mod tests {
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
         let raw = aot.run().expect("native run");
-        let val = crate::vm::Value::from_raw(raw);
+        let val = unsafe { crate::vm::Value::from_raw(raw) };
         assert_eq!(
             val.as_int(),
             Some(42),
@@ -5295,7 +5530,7 @@ mod tests {
         let mir_module = crate::mir_lower::lower_module(&hir).unwrap();
         let aot = crate::aot::AotModule::compile(&mir_module).expect("AOT compile");
         let raw = aot.run().expect("native run");
-        let val = crate::vm::Value::from_raw(raw);
+        let val = unsafe { crate::vm::Value::from_raw(raw) };
         assert_eq!(
             val.as_int(),
             Some(120),
@@ -5311,5 +5546,35 @@ mod tests {
         builder.terminate(mir::Terminator::Return(Some(tmp)));
         let func = builder.build();
         assert!(is_all_int(&func));
+    }
+
+    #[test]
+    fn test_aot_neg_of_nil_capable_int_matches_interpreter() {
+        // Nightly differential fuzz (2026-10-10) found interpreter/AOT
+        // divergences on unary `neg` of statically-Int values that are NIL at
+        // runtime: `-(1 % 0)` compiled boxed with the nil-producing local
+        // marked `KnownType::Int`, so `Unary Neg` emitted raw
+        // `sext48 → ineg → tag` instead of the checking `nulang_ineg`
+        // helper — nil's zero payload re-tagged as int 0 (Ok("0")). The
+        // interpreter raises a type error. MIR metadata is now conservative
+        // (Div/Mod/Pow results, calls, closures, function values, and
+        // migrated values stay Unknown), so boxed `neg` routes through
+        // `nulang_ineg`, which records the same type error.
+        for src in [
+            r#"fn main() { -(1 % 0) }"#,
+            r#"fn main() { -3 ** -2 }"#,
+            r#"fn main() { let x = 1 % 0; -(x) }"#,
+        ] {
+            let aot = aot_compile_source(src);
+            let err = aot
+                .run()
+                .expect_err("neg of nil must be a type error, matching the interpreter");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("type error") && msg.contains("neg"),
+                "expected neg type error, got: {}",
+                msg
+            );
+        }
     }
 }

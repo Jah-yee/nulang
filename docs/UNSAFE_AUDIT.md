@@ -41,13 +41,18 @@ later dereferenced (header read, `CStr::from_ptr`, slot walks) inside `unsafe`
 blocks that trust the tag. This undermines every SAFETY argument in the
 runtime ("ptr came from our heap") because the value may not have.
 `from_raw` even carries a `# Safety` doc section despite being a safe fn.
-**Status:** *not fixed here* — `src/vm.rs` is being rewritten by
-`fix/vm-correctness-v2` and was excluded from this change.
-**Recommended fix:** mark both `pub unsafe fn` (callers: `jit/runtime.rs`,
-`aot/*`, `runtime/*` — mechanical `unsafe {}` wrapping with a SAFETY note),
-or add a `validate_raw(raw) -> bool` debug check that rejects `TAG_PTR`
-payloads that were never returned by the heap (allocation registry or
-range check against heap blocks).
+**Status:** CLOSED (2026-09-14) — both constructors are now `pub unsafe fn
+from_raw_unchecked` / `pub unsafe fn from_bits_unchecked` (src/vm.rs), with a
+boundary-specific `SAFETY:` justification audited at every call site (trusted
+VM/JIT/AOT round-trip, WASM/runtime ABI, persistence reconstruction,
+Python/FFI/C boundary, test/fuzz harnesses). Externally supplied bits must
+enter through the fail-closed `try_from_untrusted_bits` decoder, which rejects
+pointer-tagged values before they can reach heap/GC dereference paths. The
+`NulangValue` C ingress remains covered by the C API's unsafe caller contract.
+See "F1b — CLOSED" below for the companion `Value::ptr` provenance closure
+(issue #186). Regression coverage: `tests/raw_value_provenance.rs` and a
+`compile_fail` doctest on `Value::ptr`.
+**Recommended fix:** ~~mark both `pub unsafe fn`~~ applied as described above.
 
 ### F2 — HIGH — `Value::ptr` truncates pointer addresses to 48 bits
 `src/vm.rs:1283` (`Value::ptr`: `TAG_PTR | (p as u64 & PAYLOAD_MASK)`),
@@ -128,13 +133,15 @@ commented "should never happen".
 **Fix applied:** `debug_assert!` added so header corruption is caught in
 debug/test builds.
 
-### F9 — LOW — `'static` constant pool for JIT helpers
-`src/jit/runtime.rs:432-467` (`ConstantsPtr::as_slice` returns
-`&'static [Constant]` from a thread-local raw pointer).
-Sound by the documented "valid until `clear_jit_constants`" convention;
-a missed clear + pool deallocation would dangle. Consider scoping the
-helpers to a guard type (`set` returns a `Guard` whose `Drop` clears) so
-the lifetime is enforced by RAII.
+### F9 — CLOSED — borrowed constant pool across JIT execution
+The JIT no longer stores a raw constant-pool slice with a manufactured
+`'static` lifetime in thread-local state. Interned-string helpers resolve
+through the active VM pointer plus an explicit module index and create only a
+short-lived immutable lookup borrow. `VM::try_jit_execute` prepares code while
+the module is borrowed, then moves the mutable JIT backend and raw-bit constant
+cache out of `VM` before entering native code. Re-entrant
+`nulang_jit_direct_call` therefore cannot alias those VM-owned values; debug
+assertions enforce the ownership invariant in test/debug builds.
 
 ## Fixes applied in this branch
 
@@ -162,3 +169,21 @@ F4-vm site), `src/aot/codegen.rs`, `src/mir_wasm.rs`,
   is the pre-existing
   `aot::codegen::tests::test_aot_runtime_native_perform_async`, identical
   before and after.
+
+
+### F1b — CLOSED — raw pointer construction requires provenance
+`Value::ptr(*mut u8)` is an `unsafe fn`: safe Rust can no longer manufacture a
+pointer-tagged `Value` from an arbitrary/dangling raw pointer. Its safety
+contract requires a live pointer with provenance, layout, and lifetime valid
+for every runtime consumer that may dereference it. The VM allocation API now
+exposes `ActorVmCallbacks::alloc_value`, which allocates storage and constructs
+the associated pointer `Value` in one safe operation, so normal heap allocation
+does not require callers to assert provenance manually.
+
+Remaining raw-pointer crossings are explicit `unsafe` call sites and fall into
+reviewable boundary classes: runtime/GC pointers obtained from the actor/VM
+allocator or an existing pointer `Value`; persistence pointers reconstructed
+through the live object table; host/WASM bridge storage whose lifetime is held
+by the host; and native/FFI pointers governed by the enclosing unsafe ABI
+contract. `Value::ptr` also carries a `compile_fail` doctest so a future safe
+constructor regression is caught by doctests.

@@ -126,12 +126,12 @@ pub enum Expr {
         exprs: Vec<Expr>,
         span: Span,
     },
-    /// `par { e1; e2; ... }` — an independence annotation (adopted from
-    /// nanolang): the sub-expressions are declared to have no data
-    /// dependencies on each other. Semantics are identical to a `Block`
-    /// (evaluated in order); the node is kept distinct so later passes can
-    /// use the independence information (e.g. parallel codegen or parallel
-    /// lowering).
+    /// `par { e1; e2; ... }` — an independence annotation and the source
+    /// surface reserved for scoped concurrency (RFC 0024). The current
+    /// implementation still evaluates branches in order, so keeping this AST
+    /// node distinct is semantically important: later lowering can introduce
+    /// structured concurrency only after capture, effect, cancellation, and
+    /// join invariants are enforced.
     Par {
         exprs: Vec<Expr>,
         span: Span,
@@ -541,6 +541,20 @@ pub enum ActorBackendKind {
 // Function annotations
 // ---------------------------------------------------------------------------
 
+/// Request source for compiler-bound web handler parameters.
+///
+/// This metadata does not wrap or alter the parameter's Nulang type: an
+/// `Int from query` parameter remains an `Int` to the typechecker and body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebRequestParamSource {
+    Path,
+    Query,
+    Header,
+    Cookie,
+    Body,
+    Form,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum FunctionAnnotation {
     /// `@tool(description: "...")` marks a function as an LLM-callable tool.
@@ -552,6 +566,12 @@ pub enum FunctionAnnotation {
     /// `@placement(static|server|edge|client|actor|workflow)` marks a web
     /// framework function's compile-time execution target.
     Placement(crate::types::Placement),
+    /// Contextual parameter syntax such as `limit: Int from query`.
+    RequestBinding {
+        param: String,
+        source: WebRequestParamSource,
+        source_name: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
