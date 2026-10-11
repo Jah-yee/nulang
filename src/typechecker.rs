@@ -5479,6 +5479,70 @@ mod tests {
     }
 
     #[test]
+    fn test_mgu_rejects_unknown_open_effect_tail_against_closed_row() {
+        let callback = |effect| Type::Function {
+            param: Box::new(Type::unit()),
+            ret: Box::new(Type::unit()),
+            effect,
+            cap: Capability::Ref,
+        };
+        let open = callback(EffectRow::Open(vec![Effect::IO], Region::fresh()));
+        let closed = callback(EffectRow::singleton(Effect::IO));
+        assert!(
+            mgu(&open, &closed, sp()).is_err(),
+            "unresolved open effects must not equal closed effects"
+        );
+        assert!(
+            mgu(&closed, &open, sp()).is_err(),
+            "open/closed equality must be symmetric and fail closed"
+        );
+    }
+
+    #[test]
+    fn test_nested_open_callback_cannot_satisfy_pure_callback() {
+        let outer = |nested: Type| Type::Function {
+            param: Box::new(nested),
+            ret: Box::new(Type::unit()),
+            effect: EffectRow::empty(),
+            cap: Capability::Ref,
+        };
+        let inner = |effect| Type::Function {
+            param: Box::new(Type::unit()),
+            ret: Box::new(Type::unit()),
+            effect,
+            cap: Capability::Ref,
+        };
+        let actual = outer(inner(EffectRow::Open(
+            vec![Effect::IO],
+            Region::fresh(),
+        )));
+        let expected = outer(inner(EffectRow::empty()));
+        assert!(
+            mgu_assignable(&actual, &expected, sp()).is_err(),
+            "nested unresolved callback effects must never satisfy purity"
+        );
+    }
+
+    #[test]
+    fn test_assignable_closed_callback_can_fit_a_wider_open_allowance() {
+        let callback = |effect| Type::Function {
+            param: Box::new(Type::unit()),
+            ret: Box::new(Type::unit()),
+            effect,
+            cap: Capability::Ref,
+        };
+        let pure_actual = callback(EffectRow::empty());
+        let wide_expected = callback(EffectRow::Open(
+            vec![Effect::IO],
+            Region::fresh(),
+        ));
+        assert!(
+            mgu_assignable(&pure_actual, &wide_expected, sp()).is_ok(),
+            "directional assignment permits a proven pure callback in an open allowance"
+        );
+    }
+
+    #[test]
     fn test_mgu_opaque_nominal_rejects_underlying() {
         let html = Type::Nominal {
             name: "Html".to_string(),
