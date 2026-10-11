@@ -5113,6 +5113,120 @@ mod tests {
     }
 
     #[test]
+    fn test_conditional_callback_invocation_charges_effects() {
+        let cb_type = Type::Function {
+            param: Box::new(Type::Tuple(vec![])),
+            ret: Box::new(Type::unit()),
+            effect: EffectRow::singleton(Effect::IO),
+            cap: Capability::Ref,
+        };
+        let choose = Expr::If {
+            cond: Box::new(Expr::Literal(Literal::Bool(true), s())),
+            then_branch: Box::new(Expr::Var("first".to_string(), s())),
+            else_branch: Some(Box::new(Expr::Var("second".to_string(), s()))),
+            span: s(),
+        };
+        let lambda = Expr::Lambda {
+            params: vec![
+                Param::new("first", Some(cb_type.clone())),
+                Param::new("second", Some(cb_type)),
+            ],
+            ret_type: None,
+            body: Box::new(Expr::App {
+                func: Box::new(choose),
+                args: vec![],
+                span: s(),
+            }),
+            effect: Some(EffectRow::empty()),
+            span: s(),
+        };
+        let mut checker = EffectChecker::new();
+        assert!(
+            checker.infer_effects(&EffectContext::empty(), &lambda).is_err(),
+            "calling a conditional IO callback must not bypass purity"
+        );
+    }
+
+    #[test]
+    fn test_conditional_callback_alias_charges_effects() {
+        let cb_type = Type::Function {
+            param: Box::new(Type::Tuple(vec![])),
+            ret: Box::new(Type::unit()),
+            effect: EffectRow::singleton(Effect::IO),
+            cap: Capability::Ref,
+        };
+        let choose = Expr::If {
+            cond: Box::new(Expr::Literal(Literal::Bool(false), s())),
+            then_branch: Box::new(Expr::Var("first".to_string(), s())),
+            else_branch: Some(Box::new(Expr::Var("second".to_string(), s()))),
+            span: s(),
+        };
+        let body = Expr::Let {
+            name: "selected".to_string(),
+            ty: None,
+            value: Box::new(choose),
+            body: Box::new(Expr::App {
+                func: Box::new(Expr::Var("selected".to_string(), s())),
+                args: vec![],
+                span: s(),
+            }),
+            mutable: false,
+            let_in: false,
+            span: s(),
+        };
+        let lambda = Expr::Lambda {
+            params: vec![
+                Param::new("first", Some(cb_type.clone())),
+                Param::new("second", Some(cb_type)),
+            ],
+            ret_type: None,
+            body: Box::new(body),
+            effect: Some(EffectRow::empty()),
+            span: s(),
+        };
+        let mut checker = EffectChecker::new();
+        assert!(
+            checker.infer_effects(&EffectContext::empty(), &lambda).is_err(),
+            "a computed alias must retain known callback effects"
+        );
+    }
+
+    #[test]
+    fn test_conditional_pure_callbacks_remain_accepted() {
+        let pure = Type::Function {
+            param: Box::new(Type::Tuple(vec![])),
+            ret: Box::new(Type::unit()),
+            effect: EffectRow::empty(),
+            cap: Capability::Ref,
+        };
+        let choose = Expr::If {
+            cond: Box::new(Expr::Literal(Literal::Bool(true), s())),
+            then_branch: Box::new(Expr::Var("first".to_string(), s())),
+            else_branch: Some(Box::new(Expr::Var("second".to_string(), s()))),
+            span: s(),
+        };
+        let lambda = Expr::Lambda {
+            params: vec![
+                Param::new("first", Some(pure.clone())),
+                Param::new("second", Some(pure)),
+            ],
+            ret_type: None,
+            body: Box::new(Expr::App {
+                func: Box::new(choose),
+                args: vec![],
+                span: s(),
+            }),
+            effect: Some(EffectRow::empty()),
+            span: s(),
+        };
+        let mut checker = EffectChecker::new();
+        assert!(
+            checker.infer_effects(&EffectContext::empty(), &lambda).is_ok(),
+            "a known-pure conditional callback must remain valid"
+        );
+    }
+
+    #[test]
     fn test_state_machine_effect_checks_desugared_form() {
         // Hooks and the generated transition bodies are effect-checked
         // exactly like actor behaviors: the `perform IO.print` in the entry
