@@ -14,8 +14,15 @@ for suite in ffi::c_api::tests ffi::native::tests ffi::embed::tests; do
 done
 
 cargo build "${features[@]}" --lib
-library="target/debug/libnulang.so"
-test -s "$library"
+# Honor .cargo/config.toml, CARGO_TARGET_DIR and any workspace override.
+# Cargo's configured target directory in this repository is /tmp/cargo-target,
+# not ./target; resolve it instead of assuming a local target directory.
+target_dir="$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+library="$target_dir/debug/libnulang.so"
+if [[ ! -s "$library" ]]; then
+  echo "Shared library was not produced at Cargo's target path: $library" >&2
+  exit 1
+fi
 
 for symbol in \
   nulang_runtime_new \
@@ -35,12 +42,12 @@ for symbol in \
   fi
 done
 
-mkdir -p target/embed-smoke
+mkdir -p "$target_dir/embed-smoke"
 cc -std=c11 -Wall -Wextra -Werror \
   -Iinclude \
   examples/ffi_example.c \
-  -Ltarget/debug -lnulang \
-  -Wl,-rpath,"$(pwd)/target/debug" \
-  -o target/embed-smoke/ffi_example
+  -L"$target_dir/debug" -lnulang \
+  -Wl,-rpath,"$target_dir/debug" \
+  -o "$target_dir/embed-smoke/ffi_example"
 
-target/embed-smoke/ffi_example
+"$target_dir/embed-smoke/ffi_example"
