@@ -16,6 +16,7 @@ pub enum HostError {
     ActorLimitReached,
     UnknownActor,
     UnknownBehavior,
+    DuplicateBehavior,
     IntegerOutOfRange,
 }
 
@@ -26,6 +27,7 @@ impl fmt::Display for HostError {
             Self::ActorLimitReached => "embedded actor limit reached",
             Self::UnknownActor => "unknown embedded actor",
             Self::UnknownBehavior => "unknown embedded actor behavior",
+            Self::DuplicateBehavior => "actor behavior is already registered",
             Self::IntegerOutOfRange => "integer does not fit Nulang's 48-bit Int representation",
         };
         f.write_str(message)
@@ -106,6 +108,9 @@ impl EmbeddedActorHost {
             .actors
             .get_mut(&actor_id)
             .ok_or(HostError::UnknownActor)?;
+        if actor.behavior_table.iter().any(|entry| entry.name == name) {
+            return Err(HostError::DuplicateBehavior);
+        }
         actor.register_behavior(name, handler);
         Ok(())
     }
@@ -161,7 +166,7 @@ impl EmbeddedActorHost {
     /// Stop host operations and drop all locally owned actors and their state.
     /// Idempotent; does not persist actor state or await distributed messages.
     pub fn shutdown(&mut self) {
-        self.runtime.take();
+        drop(self.runtime.take());
         self.owned_actors.clear();
     }
 }
