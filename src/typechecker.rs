@@ -5315,6 +5315,35 @@ mod tests {
     }
 
     #[test]
+    fn test_call_specializes_expected_tail_without_erasing_actual_open_tail() {
+        let expected_tail = Region::fresh();
+        let actual_tail = Region::fresh();
+        let mut ctx = TypeContext::new();
+        ctx.bind(
+            "consume".to_string(),
+            row_callback_consumer(expected_tail),
+            Capability::Ref,
+            false,
+        );
+        ctx.bind(
+            "unknown_fs".to_string(),
+            effect_callback(EffectRow::Open(vec![Effect::FS], actual_tail)),
+            Capability::Ref,
+            false,
+        );
+        let mut tc = TypeChecker::new();
+        let (_, result) = tc
+            .infer_expr(&ctx, &invoke_callback("consume", "unknown_fs"))
+            .unwrap();
+        match result {
+            Type::Function { effect, .. } => {
+                assert_eq!(effect, EffectRow::Open(vec![Effect::FS], actual_tail));
+            }
+            ty => panic!("expected function result, got {ty:?}"),
+        }
+    }
+
+    #[test]
     fn test_two_callback_arguments_share_constraints_within_one_call() {
         let tail = Region::fresh();
         let consumer = Type::Function {
