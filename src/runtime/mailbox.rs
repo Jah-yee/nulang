@@ -933,7 +933,7 @@ mod transactional_receive_tests {
     }
 
     #[test]
-    fn empty_selective_receive_avoids_index_allocation_and_observes_later_arrival() {
+    fn test_empty_selective_receive_avoids_index_allocation_and_observes_later_arrival() {
         let mut mb = Mailbox::new(1);
         for _ in 0..32 {
             assert!(mb.receive_match(&[7]).is_none());
