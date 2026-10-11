@@ -233,6 +233,12 @@ jobs:
       - name: Check zero warnings
         run: cargo check --locked --tests --no-default-features
 
+      # Compile and execute the first truly linked Nulang artifact using
+      # only the opt-in native executable feature. Default/JIT-only builds
+      # must not need cranelift-object or tempfile.
+      - name: Test opt-in standalone native executable (Linux)
+        run: cargo test --locked --no-default-features --features native-executable --test native_tiny_executable
+
       - name: Smoke test standalone Savina runner
         run: |
           output="$(cargo run --locked --no-default-features --features savina-bench --bin nulang-savina -- --benchmark ping_pong --format jsonl)"
