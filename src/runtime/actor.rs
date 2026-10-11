@@ -841,8 +841,7 @@ mod tests {
     #[test]
     fn idle_actor_does_not_reserve_inline_hibernation_snapshot() {
         let mut actor = Actor::new(123, "sleepy", 0);
-        assert!(std::mem::size_of_val(&actor.hibernation_state)
-            <= std::mem::size_of::<usize>());
+        assert!(std::mem::size_of_val(&actor.hibernation_state) <= std::mem::size_of::<usize>());
         assert!(actor.hibernation_state.is_none());
         assert!(!actor.is_hibernated());
 
@@ -853,7 +852,10 @@ mod tests {
             state_fields: HashMap::new(),
         }));
         assert!(actor.is_hibernated());
-        assert_eq!(actor.hibernation_state.as_ref().unwrap().module_hash, [9; 32]);
+        assert_eq!(
+            actor.hibernation_state.as_ref().unwrap().module_hash,
+            [9; 32]
+        );
 
         actor.reset(124, "awake", 0);
         assert!(!actor.is_hibernated());
