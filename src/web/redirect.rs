@@ -10,8 +10,7 @@ pub fn is_safe_redirect_target(url: &str) -> bool {
     url.starts_with('/')
         && !url.starts_with("//")
         && !url.contains('\\')
-        && !url.chars().any(char::is_control)
-        && !url.bytes().any(|b| b.is_ascii_whitespace())
+        && url.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
 fn escape_html_attribute(value: &str) -> String {
@@ -53,7 +52,7 @@ mod tests {
         for denied in [
             "", "tasks", "//evil.example", "https://evil.example", "javascript:alert(1)",
             "/\\evil.example", "/\r\nLocation: https://evil.example",
-            "/ok\nX-Header: injected", "/ok\u{007f}",
+            "/ok\nX-Header: injected", "/ok\u{007f}", "/caf\u{00e9}",
         ] {
             assert!(!is_safe_redirect_target(denied), "{denied:?}");
         }
