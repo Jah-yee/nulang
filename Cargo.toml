@@ -49,6 +49,7 @@ native-codegen = [
     "dep:cranelift-native",
     "dep:cranelift-frontend",
     "dep:cranelift-codegen",
+    "dep:cranelift-object",
     "dep:target-lexicon",
 ]
 # Marker profile for embedded mobile runtimes. Intentionally empty: the
@@ -125,6 +126,7 @@ rustyline = { version = "15", default-features = false, features = ["with-file-h
 # Cranelift JIT backend
 cranelift = { version = "0.132", optional = true }
 cranelift-jit = { version = "0.132", optional = true }
+cranelift-object = { version = "0.132", optional = true }
 cranelift-module = { version = "0.132", optional = true }
 cranelift-native = { version = "0.132", optional = true }
 cranelift-frontend = { version = "0.132", optional = true }
