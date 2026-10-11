@@ -1145,12 +1145,19 @@ impl WebDevServer {
         let subscription = match realtime_subscribe(room) {
             Ok(subscription) => subscription,
             Err(error) => {
-                let status = if error == RealtimeLimitError::InvalidRoom { 400 } else { 503 };
+                let status = if error == RealtimeLimitError::InvalidRoom {
+                    400
+                } else {
+                    503
+                };
                 HttpServerState::write_response(
                     stream,
                     &HttpResponse {
                         status,
-                        headers: vec![("Content-Type".into(), "text/plain; charset=utf-8".into())],
+                        headers: vec![(
+                            "Content-Type".into(),
+                            "text/plain; charset=utf-8".into(),
+                        )],
                         body: format!("SSE subscription rejected: {error:?}").into_bytes(),
                     },
                 );
@@ -1503,7 +1510,7 @@ mod tests {
     fn sse_heartbeat_is_a_comment_and_not_an_application_message() {
         let mut wire = Vec::new();
         WebDevServer::write_sse_keepalive(&mut wire).unwrap();
-        assert_eq!(wire, b": keep-alive\n\n");
+        assert_eq!(wire.as_slice(), b": keep-alive\n\n");
     }
 
     #[test]
