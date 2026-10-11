@@ -1500,10 +1500,16 @@ pub(crate) mod tests {
         // finishes; a finite Cursor EOF models a real client disconnect.
         let msgs = run_session_until_terminated(source, &script);
 
-        // No breakpoints set -> the program runs to completion.
+        // No breakpoints set -> the program runs to successful completion.
+        // An erroring debuggee also emits Exited + Terminated; event presence
+        // alone would mask an execution failure in this regression test.
         assert!(
-            msgs.iter().any(|m| m["event"] == "exited"),
-            "expected exited, got {:#?}",
+            msgs.iter().any(|m| {
+                m["type"] == "event"
+                    && m["event"] == "exited"
+                    && m["body"]["exitCode"] == 0
+            }),
+            "expected successful exit code 0, got {:#?}",
             msgs
         );
         assert!(
