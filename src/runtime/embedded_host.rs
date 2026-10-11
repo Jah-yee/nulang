@@ -214,6 +214,17 @@ mod tests {
     }
 
     #[test]
+    fn embedded_host_rejects_duplicate_behavior_registration() {
+        let mut host = EmbeddedActorHost::new(1);
+        let actor = host.spawn(vec![]).unwrap();
+        host.register_behavior(actor, "add", add_to_counter).unwrap();
+        assert_eq!(
+            host.register_behavior(actor, "add", add_to_counter),
+            Err(HostError::DuplicateBehavior)
+        );
+    }
+
+    #[test]
     fn embedded_host_rejects_integer_truncation_before_state_or_message_mutation() {
         let mut host = EmbeddedActorHost::new(2);
         assert_eq!(
