@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import platform
+import random
 import re
 import shutil
 import statistics
@@ -35,11 +36,31 @@ AB_RECORD_RE = re.compile(
 )
 
 
+CARGO_TARGET_ROOT = Path(tempfile.gettempdir()) / "nulang-ab-cargo-target"
+
+
+def cargo_environment(variant: str) -> dict[str, str]:
+    """Return an environment with build artifacts isolated per A/B variant.
+
+    The repository-level Cargo config uses one absolute target directory.
+    Sharing that directory between the detached base worktree and candidate
+    checkout can make Cargo reuse the base library artifact while compiling
+    candidate integration tests. Keep dependency/build caches persistent across
+    harness runs, but never share one target directory across the two variants.
+    """
+    if variant not in {"base", "candidate"}:
+        raise ValueError(f"unknown A/B variant: {variant}")
+    env = os.environ.copy()
+    env["CARGO_TARGET_DIR"] = str(CARGO_TARGET_ROOT / variant)
+    return env
+
+
 def command_output(
     command: list[str],
     *,
     cwd: Path,
     cpu_affinity: set[int] | None = None,
+    env: dict[str, str] | None = None,
 ) -> str:
     preexec_fn = None
     if cpu_affinity is not None:
@@ -61,6 +82,7 @@ def command_output(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         preexec_fn=preexec_fn,
+        env=env,
     )
     if proc.returncode != 0:
         sys.stderr.write(proc.stdout)
@@ -101,6 +123,7 @@ def parse_records(output: str) -> dict[str, dict[str, int]]:
         )
     return rows
 
+
 def measurement_affinity(cpu_mode: str) -> set[int] | None:
     if cpu_mode == "host":
         return None
@@ -120,7 +143,7 @@ def cargo_command(extra_args: list[str]) -> list[str]:
         "test",
         "--release",
         *extra_args,
-        "benchmarks::bench_",
+        "bench_",
         "--",
         "--nocapture",
         "--test-threads=1",
@@ -134,7 +157,7 @@ def cargo_build_command(extra_args: list[str]) -> list[str]:
         "--release",
         "--no-run",
         *extra_args,
-        "benchmarks::bench_",
+        "bench_",
     ]
 
 
@@ -205,6 +228,109 @@ def comparisons(
     return out
 
 
+def _bootstrap_median_ci(
+    values: list[float],
+    *,
+    iterations: int = 4_000,
+) -> tuple[float, float]:
+    """Deterministic percentile bootstrap CI for a paired median."""
+    if not values:
+        raise ValueError("bootstrap requires at least one value")
+    if len(values) == 1:
+        return values[0], values[0]
+
+    rng = random.Random(0x4E554C41)
+    n = len(values)
+    medians = [
+        statistics.median(values[rng.randrange(n)] for _ in range(n))
+        for _ in range(iterations)
+    ]
+    medians.sort()
+    lower_idx = int(0.025 * (iterations - 1))
+    upper_idx = int(0.975 * (iterations - 1))
+    return medians[lower_idx], medians[upper_idx]
+
+
+def paired_comparisons(
+    samples: dict[str, dict[str, list[dict[str, int]]]]
+) -> dict[str, dict[str, float | int]]:
+    """Compare base/candidate samples from the same measurement round.
+
+    The runner alternates execution order per round, but rows are appended in
+    round order for each variant. Pairing by index therefore cancels a large
+    part of monotonic host/thermal drift that a ratio of independent medians
+    cannot remove.
+    """
+    out: dict[str, dict[str, float | int]] = {}
+    common = set(samples["base"]) & set(samples["candidate"])
+    for name in sorted(common):
+        base_rows = samples["base"][name]
+        candidate_rows = samples["candidate"][name]
+        if not base_rows or not candidate_rows:
+            continue
+        if len(base_rows) != len(candidate_rows):
+            raise RuntimeError(
+                f"{name}: paired sample count changed "
+                f"(base={len(base_rows)}, candidate={len(candidate_rows)})"
+            )
+
+        speedups: list[float] = []
+        throughput_changes: list[float] = []
+        latency_changes: list[float] = []
+        for index, (base, candidate) in enumerate(zip(base_rows, candidate_rows)):
+            if base["messages"] != candidate["messages"]:
+                raise RuntimeError(
+                    f"{name}: operation count changed in pair {index} "
+                    f"(base={base['messages']}, candidate={candidate['messages']})"
+                )
+            base_ns = float(base["elapsed_ns"])
+            candidate_ns = float(candidate["elapsed_ns"])
+            if base_ns <= 0 or candidate_ns <= 0:
+                raise RuntimeError(f"{name}: elapsed_ns must be positive")
+            speedup = base_ns / candidate_ns
+            speedups.append(speedup)
+            throughput_changes.append((speedup - 1.0) * 100.0)
+            latency_changes.append((candidate_ns / base_ns - 1.0) * 100.0)
+
+        lower, upper = _bootstrap_median_ci(speedups)
+        out[name] = {
+            "pairs": len(speedups),
+            "median_speedup_x": statistics.median(speedups),
+            "median_throughput_change_pct": statistics.median(throughput_changes),
+            "median_latency_change_pct": statistics.median(latency_changes),
+            "speedup_ci95_lower": lower,
+            "speedup_ci95_upper": upper,
+        }
+    return out
+
+
+def print_paired_table(
+    paired: dict[str, dict[str, float | int]],
+) -> None:
+    if not paired:
+        return
+
+    print()
+    print("paired round-aligned A/B")
+    print(
+        "benchmark            pairs   median throughput delta   median speedup   95% bootstrap CI"
+    )
+    print(
+        "-------------------  -----   -----------------------   --------------   ----------------"
+    )
+    ordered = [name for name in BENCHMARKS if name in paired]
+    ordered.extend(sorted(name for name in paired if name not in BENCHMARKS))
+    for name in ordered:
+        row = paired[name]
+        print(
+            f"{name:<19}  {int(row['pairs']):>5}   "
+            f"{float(row['median_throughput_change_pct']):>+22.2f}%   "
+            f"{float(row['median_speedup_x']):>13.3f}x   "
+            f"[{float(row['speedup_ci95_lower']):.3f}, "
+            f"{float(row['speedup_ci95_upper']):.3f}]"
+        )
+
+
 def print_table(
     summary: dict[str, dict[str, dict[str, float | int]]],
     compare: dict[str, dict[str, float]],
@@ -227,6 +353,7 @@ def print_table(
             f"{name:<19}  {base:>11,.0f}  {candidate:>17,.0f}  "
             f"{delta:>+16.2f}%  {speedup:>6.3f}x"
         )
+
 
 def print_candidate_only(
     summary: dict[str, dict[str, dict[str, float | int]]]
@@ -289,10 +416,23 @@ def main() -> int:
                     "record format; merge/rebase the benchmark foundation first"
                 )
 
+        environments = {
+            "base": cargo_environment("base"),
+            "candidate": cargo_environment("candidate"),
+        }
+
         print(f"[build] base={args.base_ref}", flush=True)
-        command_output(cargo_build_command(extra_args), cwd=base)
+        command_output(
+            cargo_build_command(extra_args),
+            cwd=base,
+            env=environments["base"],
+        )
         print("[build] candidate=HEAD", flush=True)
-        command_output(cargo_build_command(extra_args), cwd=ROOT)
+        command_output(
+            cargo_build_command(extra_args),
+            cwd=ROOT,
+            env=environments["candidate"],
+        )
 
         samples: dict[str, dict[str, list[dict[str, int]]]] = {
             variant: {name: [] for name in BENCHMARKS}
@@ -318,6 +458,7 @@ def main() -> int:
                     cargo_command(extra_args),
                     cwd=roots[variant],
                     cpu_affinity=affinity,
+                    env=environments[variant],
                 )
                 records = parse_records(output)
                 if measured:
@@ -326,7 +467,9 @@ def main() -> int:
 
         summary = summarize(samples)
         compare = comparisons(summary)
+        paired = paired_comparisons(samples)
         print_table(summary, compare)
+        print_paired_table(paired)
         print_candidate_only(summary)
 
         allowed = (
@@ -335,8 +478,8 @@ def main() -> int:
             else None
         )
         report = {
-            "schema": 1,
-            "methodology": "same-host same-CPU Nulang base-vs-candidate actor A/B",
+            "schema": 2,
+            "methodology": "same-host same-CPU round-paired Nulang base-vs-candidate actor A/B",
             "base_ref": args.base_ref,
             "base_sha": maybe_output(["git", "rev-parse", "HEAD"], cwd=base),
             "candidate_sha": maybe_output(["git", "rev-parse", "HEAD"]),
@@ -371,6 +514,7 @@ def main() -> int:
             "samples": samples,
             "summary": summary,
             "comparison": compare,
+            "paired_comparison": paired,
         }
         if args.output:
             args.output.parent.mkdir(parents=True, exist_ok=True)
