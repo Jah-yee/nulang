@@ -157,7 +157,7 @@ impl RustEmbedder {
             if let RustValue::Int(value) = arg {
                 if crate::vm::Value::int(*value).as_int() != Some(*value) {
                     for id in handles {
-                        self.inner.take_owned(id);
+                        let _ = self.inner.take_owned(id);
                     }
                     return Err(EmbedError("Int is outside the Nulang VM range".to_string()));
                 }
@@ -165,7 +165,7 @@ impl RustEmbedder {
             let id = self.inner.store_owned(arg.clone().into());
             if id == 0 {
                 for id in handles {
-                    self.inner.take_owned(id);
+                    let _ = self.inner.take_owned(id);
                 }
                 return Err(EmbedError(self.inner.last_error_message()));
             }
@@ -188,7 +188,7 @@ impl RustEmbedder {
             )
         };
         for id in handles {
-            self.inner.take_owned(id);
+            let _ = self.inner.take_owned(id);
         }
         self.take_value(result)
     }
