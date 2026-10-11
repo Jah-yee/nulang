@@ -22,7 +22,7 @@ import tempfile
 from datetime import datetime, timezone
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-CASES = ("first_poll", "repeated_poll")
+CASES = ("first_poll", "repeated_poll", "empty_then_arrival")
 
 
 def run(command: list[str], *, cwd: pathlib.Path, env: dict[str, str] | None = None) -> str:
