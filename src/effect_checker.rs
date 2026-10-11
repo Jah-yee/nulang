@@ -2962,6 +2962,21 @@ mod tests {
     }
 
     #[test]
+    fn test_open_effect_row_subset_requires_same_unresolved_variable() {
+        // Distinct row variables represent independent unknown effect sets.
+        // Having the same known IO effect does not constrain their tails.
+        let first = EffectRow::Open(vec![Effect::IO], Region::fresh());
+        let second = EffectRow::Open(vec![Effect::IO], Region::fresh());
+        assert!(!effect_row_subset(&first, &second));
+
+        // Identical variable identity preserves valid effect polymorphism.
+        let shared = Region::fresh();
+        let inferred = EffectRow::Open(vec![Effect::IO], shared);
+        let allowed = EffectRow::Open(vec![Effect::IO, Effect::FS], shared);
+        assert!(effect_row_subset(&inferred, &allowed));
+    }
+
+    #[test]
     fn test_effect_row_union() {
         let a = EffectRow::Closed(vec![Effect::IO]);
         let b = EffectRow::Closed(vec![Effect::FS]);
