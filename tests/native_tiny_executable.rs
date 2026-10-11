@@ -213,3 +213,43 @@ fn standalone_print_matches_bytecode_output() {
     assert_eq!(native.stderr, bytecode.stderr, "bytecode/native stderr mismatch");
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn explicit_output_equal_to_source_is_rejected_without_modification() {
+    let dir = test_dir();
+    let input = dir.join("source.nula");
+    let source = "perform IO.print(\"keep source\")";
+    fs::write(&input, source).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_nulang"))
+        .args(["--emit-exe", "--out"])
+        .arg(&input)
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert_eq!(fs::read_to_string(&input).unwrap(), source);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn extensionless_source_defaults_to_distinct_binary_name() {
+    let dir = test_dir();
+    let input = dir.join("script");
+    let source = "perform IO.print(\"extensionless\")";
+    fs::write(&input, source).unwrap();
+    let built = Command::new(env!("CARGO_BIN_EXE_nulang"))
+        .arg("--emit-exe")
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "compiler stderr: {}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    assert_eq!(fs::read_to_string(&input).unwrap(), source);
+    let run = Command::new(dir.join("script.bin")).output().unwrap();
+    assert!(run.status.success());
+    assert_eq!(run.stdout, b"extensionless\n");
+    fs::remove_dir_all(dir).unwrap();
+}
