@@ -30,10 +30,10 @@ fn build(dir: &Path, source: &str) -> std::process::Output {
 
 #[test]
 fn hello_world_is_a_real_executable_without_the_nulang_runtime() {
-    if Command::new("cc").arg("--version").output().is_err() {
-        eprintln!("skipping: host C linker unavailable");
-        return;
-    }
+    assert!(
+        Command::new("cc").arg("--version").output().is_ok(),
+        "native executable tests require a host C linker (cc)"
+    );
     let dir = test_dir();
     let built = build(&dir, "perform IO.print(\"Hello from native Nulang\")");
     assert!(
@@ -67,5 +67,38 @@ fn embedded_nul_is_rejected_without_truncating_output() {
     let built = build(&dir, "perform IO.print(\"A\\0B\")");
     assert!(!built.status.success());
     assert!(!dir.join("hello").exists());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn multiple_prints_preserve_order_and_utf8() {
+    let dir = test_dir();
+    let built = build(
+        &dir,
+        "perform IO.print(\"First\");\nperform IO.print(\"Olá, Nulang\")",
+    );
+    assert!(
+        built.status.success(),
+        "compiler stderr: {}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let run = Command::new(dir.join("hello")).output().unwrap();
+    assert_eq!(run.status.code(), Some(0));
+    assert_eq!(run.stdout, "First\nOlá, Nulang\n".as_bytes());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn unsupported_source_preserves_existing_executable_bytes() {
+    let dir = test_dir();
+    let artifact = dir.join("hello");
+    fs::write(&artifact, b"existing-good-artifact").unwrap();
+    let built = build(
+        &dir,
+        "let greeting = \"Hello\" + \" World\";\nperform IO.print(greeting)",
+    );
+    assert!(!built.status.success());
+    assert!(String::from_utf8_lossy(&built.stderr).contains("unsupported"));
+    assert_eq!(fs::read(&artifact).unwrap(), b"existing-good-artifact");
     fs::remove_dir_all(dir).unwrap();
 }
