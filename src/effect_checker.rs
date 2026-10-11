@@ -579,6 +579,30 @@ impl EffectChecker {
         self.fn_rows.get(name).cloned()
     }
 
+    /// Resolve callable effects through a conditional expression as well as
+    /// direct function names and annotated lambdas. A value-returning branch
+    /// that is not proven callable must not be silently treated as pure when
+    /// invoked; callers handle that unknown case conservatively.
+    fn known_callable_expr_row(&self, expr: &Expr) -> Option<EffectRow> {
+        match expr {
+            Expr::Var(name, _) => self.known_callable_row(name),
+            Expr::Lambda {
+                effect: Some(effect),
+                ..
+            } => Some(effect.clone()),
+            Expr::If {
+                then_branch,
+                else_branch: Some(else_branch),
+                ..
+            } => {
+                let then_row = self.known_callable_expr_row(then_branch)?;
+                let else_row = self.known_callable_expr_row(else_branch)?;
+                Some(effect_row_union(&then_row, &else_row))
+            }
+            _ => None,
+        }
+    }
+
     /// Infer a body with a local alias that may carry a callable effect
     /// annotation. Keep the binding scoped even when the row is unknown.
     fn infer_with_callable_bound(
@@ -643,10 +667,16 @@ impl EffectChecker {
                 for arg in args {
                     row = effect_row_union(&row, &self.infer_effects(ctx, arg)?);
                 }
-                if let Expr::Var(name, _) = func.as_ref() {
-                    if let Some(callee_row) = self.known_callable_row(name) {
-                        row = effect_row_union(&row, &callee_row);
-                    }
+                if let Some(callee_row) = self.known_callable_expr_row(func) {
+                    row = effect_row_union(&row, &callee_row);
+                } else if matches!(func.as_ref(), Expr::If { .. }) {
+                    // A computed callable with an unproven branch cannot
+                    // discharge a closed effect budget merely because
+                    // evaluating its branch selector is pure.
+                    row = effect_row_union(
+                        &row,
+                        &EffectRow::Open(vec![], Region::fresh()),
+                    );
                 }
                 Ok(row)
             }
@@ -659,14 +689,15 @@ impl EffectChecker {
                 let val_row = self.infer_effects(ctx, value)?;
                 // Capture only statically known callable provenance. An
                 // unrelated local binding remains an explicit shadow.
-                let callable = match value.as_ref() {
-                    Expr::Var(source, _) => self.known_callable_row(source),
-                    Expr::Lambda {
-                        effect: Some(effect),
-                        ..
-                    } => Some(effect.clone()),
-                    _ => None,
-                };
+                let callable = self.known_callable_expr_row(value).or_else(|| {
+                    if matches!(value.as_ref(), Expr::If { .. }) {
+                        // Retain unknown callable provenance for computed
+                        // aliases until inference can prove a closed budget.
+                        Some(EffectRow::Open(vec![], Region::fresh()))
+                    } else {
+                        None
+                    }
+                });
                 let body_row = self.infer_with_callable_bound(ctx, name, callable, body)?;
                 Ok(effect_row_union(&val_row, &body_row))
             }
@@ -5109,6 +5140,120 @@ mod tests {
         assert!(
             checker.check_decl(&ast.decls[0]).is_ok(),
             "actor behavior can invoke an IO callback when the contract permits it"
+        );
+    }
+
+    #[test]
+    fn test_conditional_callback_invocation_charges_effects() {
+        let cb_type = Type::Function {
+            param: Box::new(Type::Tuple(vec![])),
+            ret: Box::new(Type::unit()),
+            effect: EffectRow::singleton(Effect::IO),
+            cap: Capability::Ref,
+        };
+        let choose = Expr::If {
+            cond: Box::new(Expr::Literal(Literal::Bool(true), s())),
+            then_branch: Box::new(Expr::Var("first".to_string(), s())),
+            else_branch: Some(Box::new(Expr::Var("second".to_string(), s()))),
+            span: s(),
+        };
+        let lambda = Expr::Lambda {
+            params: vec![
+                Param::new("first", Some(cb_type.clone())),
+                Param::new("second", Some(cb_type)),
+            ],
+            ret_type: None,
+            body: Box::new(Expr::App {
+                func: Box::new(choose),
+                args: vec![],
+                span: s(),
+            }),
+            effect: Some(EffectRow::empty()),
+            span: s(),
+        };
+        let mut checker = EffectChecker::new();
+        assert!(
+            checker.infer_effects(&EffectContext::empty(), &lambda).is_err(),
+            "calling a conditional IO callback must not bypass purity"
+        );
+    }
+
+    #[test]
+    fn test_conditional_callback_alias_charges_effects() {
+        let cb_type = Type::Function {
+            param: Box::new(Type::Tuple(vec![])),
+            ret: Box::new(Type::unit()),
+            effect: EffectRow::singleton(Effect::IO),
+            cap: Capability::Ref,
+        };
+        let choose = Expr::If {
+            cond: Box::new(Expr::Literal(Literal::Bool(false), s())),
+            then_branch: Box::new(Expr::Var("first".to_string(), s())),
+            else_branch: Some(Box::new(Expr::Var("second".to_string(), s()))),
+            span: s(),
+        };
+        let body = Expr::Let {
+            name: "selected".to_string(),
+            ty: None,
+            value: Box::new(choose),
+            body: Box::new(Expr::App {
+                func: Box::new(Expr::Var("selected".to_string(), s())),
+                args: vec![],
+                span: s(),
+            }),
+            mutable: false,
+            let_in: false,
+            span: s(),
+        };
+        let lambda = Expr::Lambda {
+            params: vec![
+                Param::new("first", Some(cb_type.clone())),
+                Param::new("second", Some(cb_type)),
+            ],
+            ret_type: None,
+            body: Box::new(body),
+            effect: Some(EffectRow::empty()),
+            span: s(),
+        };
+        let mut checker = EffectChecker::new();
+        assert!(
+            checker.infer_effects(&EffectContext::empty(), &lambda).is_err(),
+            "a computed alias must retain known callback effects"
+        );
+    }
+
+    #[test]
+    fn test_conditional_pure_callbacks_remain_accepted() {
+        let pure = Type::Function {
+            param: Box::new(Type::Tuple(vec![])),
+            ret: Box::new(Type::unit()),
+            effect: EffectRow::empty(),
+            cap: Capability::Ref,
+        };
+        let choose = Expr::If {
+            cond: Box::new(Expr::Literal(Literal::Bool(true), s())),
+            then_branch: Box::new(Expr::Var("first".to_string(), s())),
+            else_branch: Some(Box::new(Expr::Var("second".to_string(), s()))),
+            span: s(),
+        };
+        let lambda = Expr::Lambda {
+            params: vec![
+                Param::new("first", Some(pure.clone())),
+                Param::new("second", Some(pure)),
+            ],
+            ret_type: None,
+            body: Box::new(Expr::App {
+                func: Box::new(choose),
+                args: vec![],
+                span: s(),
+            }),
+            effect: Some(EffectRow::empty()),
+            span: s(),
+        };
+        let mut checker = EffectChecker::new();
+        assert!(
+            checker.infer_effects(&EffectContext::empty(), &lambda).is_ok(),
+            "a known-pure conditional callback must remain valid"
         );
     }
 
