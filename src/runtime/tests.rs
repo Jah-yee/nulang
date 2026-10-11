@@ -225,6 +225,23 @@ fn embedded_pump_is_bounded_and_preserves_pending_mailbox_work() {
 }
 
 #[test]
+fn embedded_pump_does_not_count_empty_spawn_tokens_as_messages() {
+    let mut rt = Runtime::new();
+    let actor_id = rt.spawn_actor(Box::new(Vec::new));
+
+    // Spawning queues an initial scheduler token even without a message.
+    // Polling an idle actor must not report an executed message.
+    assert_eq!(rt.pump_ready(1), 0);
+    assert!(rt.actors[&actor_id].mailbox.is_empty());
+
+    declare_test_behavior(&mut rt, actor_id, "tick");
+    rt.send_message(actor_id, "tick", &[]);
+    assert_eq!(rt.pump_ready(1), 1);
+    assert!(rt.actors[&actor_id].mailbox.is_empty());
+    assert_eq!(rt.pump_ready(1), 0);
+}
+
+#[test]
 fn embedded_pump_zero_budget_does_not_execute_messages() {
     let mut rt = Runtime::new();
     let actor_id = rt.spawn_actor(Box::new(Vec::new));
