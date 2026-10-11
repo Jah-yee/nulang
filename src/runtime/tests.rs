@@ -187,25 +187,39 @@ fn run_ready_actor_turn(rt: &mut Runtime, actor_id: u64) {
 fn embedded_pump_is_bounded_and_preserves_pending_mailbox_work() {
     let mut rt = Runtime::new();
     let actor_id = rt.spawn_actor(Box::new(|| vec![("count".to_string(), Value::int(0))]));
-    rt.actors.get_mut(&actor_id).unwrap().register_behavior("inc", |actor, _args| {
-        let count = actor.get_state_field("count").and_then(|v| v.as_int()).unwrap();
-        actor.set_state_field("count", Value::int(count + 1));
-    });
+    rt.actors
+        .get_mut(&actor_id)
+        .unwrap()
+        .register_behavior("inc", |actor, _args| {
+            let count = actor
+                .get_state_field("count")
+                .and_then(|v| v.as_int())
+                .unwrap();
+            actor.set_state_field("count", Value::int(count + 1));
+        });
     for _ in 0..5 {
         rt.send_message(actor_id, "inc", &[]);
     }
 
-    assert_eq!(rt.pump_ready(2), 2, "must never exceed the caller's turn budget");
+    assert_eq!(
+        rt.pump_ready(2),
+        2,
+        "must never exceed the caller's turn budget"
+    );
     assert_eq!(rt.actors[&actor_id].mailbox.len(), 3);
     assert_eq!(
-        rt.actors[&actor_id].get_state_field("count").and_then(|v| v.as_int()),
+        rt.actors[&actor_id]
+            .get_state_field("count")
+            .and_then(|v| v.as_int()),
         Some(2)
     );
 
     assert_eq!(rt.pump_ready(10), 3);
     assert_eq!(rt.actors[&actor_id].mailbox.len(), 0);
     assert_eq!(
-        rt.actors[&actor_id].get_state_field("count").and_then(|v| v.as_int()),
+        rt.actors[&actor_id]
+            .get_state_field("count")
+            .and_then(|v| v.as_int()),
         Some(5)
     );
 }
@@ -230,7 +244,9 @@ fn embedded_pump_does_not_wait_for_future_timers() {
     // A future pending timer would keep Runtime::run_scheduler in its idle
     // wait loop for roughly this full delay. Host polling must return now.
     // This timer does not fire during the test, so it needs no live target.
-    let timer = rt.timer_wheel.send_after(Duration::from_secs(30), 0, 0, vec![]);
+    let timer = rt
+        .timer_wheel
+        .send_after(Duration::from_secs(30), 0, 0, vec![]);
     let started = Instant::now();
     assert_eq!(rt.pump_ready(1), 0);
     assert!(
