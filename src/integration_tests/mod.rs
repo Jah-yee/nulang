@@ -73,7 +73,10 @@ mod tests {
             actor_id: u64,
             effect_id: DurableEffectId,
         ) -> std::io::Result<Option<DurableEffectPersistenceRecord>> {
-            self.0.lock().unwrap().load_durable_effect(actor_id, effect_id)
+            self.0
+                .lock()
+                .unwrap()
+                .load_durable_effect(actor_id, effect_id)
         }
         fn save_snapshot(&mut self, snapshot: ActorSnapshot) -> std::io::Result<()> {
             self.0.lock().unwrap().save_snapshot(snapshot)
@@ -151,16 +154,19 @@ mod tests {
         // SignalReceived must persist; only the resumed StepCompleted commit
         // fails. The actor may not expose speculative post-resume state.
         store.fail_next_terminal_transition();
-        rt.borrow_mut().signal_workflow(actor_id, "go", None).unwrap();
+        rt.borrow_mut()
+            .signal_workflow(actor_id, "go", None)
+            .unwrap();
         assert!(
             !store.1.load(Ordering::SeqCst),
             "signal resume must actually reach the injected terminal failure"
         );
 
         assert!(
-            !store.read_workflow_events(actor_id).iter().any(|event| {
-                matches!(event, WorkflowEvent::StepCompleted { .. })
-            }),
+            !store
+                .read_workflow_events(actor_id)
+                .iter()
+                .any(|event| { matches!(event, WorkflowEvent::StepCompleted { .. }) }),
             "failed atomic StepCompleted must not become durable"
         );
         let snapshot = store.load_snapshot(actor_id).unwrap();
@@ -8502,12 +8508,18 @@ match { a: 2, b: 9 } with {
         assert_eq!(store.latest_sequence(actor_id), tail.sequence);
 
         let live = rt.borrow();
-        let actor = live.actors.get(&actor_id).expect("workflow actor must recover");
+        let actor = live
+            .actors
+            .get(&actor_id)
+            .expect("workflow actor must recover");
         assert_eq!(
             actor.get_state_field("step_index").and_then(|v| v.as_int()),
             Some(1)
         );
-        assert_eq!(live.actor_state_string(actor_id, "answer").as_deref(), Some("world"));
+        assert_eq!(
+            live.actor_state_string(actor_id, "answer").as_deref(),
+            Some("world")
+        );
     }
 
     /// Crash-and-recover for a workflow step suspended on `Inference.ask`: the
