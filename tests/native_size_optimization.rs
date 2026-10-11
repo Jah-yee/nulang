@@ -9,7 +9,14 @@ use std::process::Command;
 #[test]
 fn native_small_optimization_preserves_program_result() {
     let output = Command::new(env!("CARGO_BIN_EXE_nulang"))
-        .args(["--backend", "native", "--native-opt", "small", "--eval", "1 + 2 * 3"])
+        .args([
+            "--backend",
+            "native",
+            "--native-opt",
+            "small",
+            "--eval",
+            "1 + 2 * 3",
+        ])
         .output()
         .expect("run Nulang native backend");
     assert!(
@@ -27,7 +34,14 @@ fn native_small_optimization_preserves_program_result() {
 #[test]
 fn native_optimization_rejects_unknown_mode() {
     let output = Command::new(env!("CARGO_BIN_EXE_nulang"))
-        .args(["--backend", "native", "--native-opt", "invalid", "--eval", "1 + 2"])
+        .args([
+            "--backend",
+            "native",
+            "--native-opt",
+            "invalid",
+            "--eval",
+            "1 + 2",
+        ])
         .output()
         .expect("run Nulang CLI");
     assert!(!output.status.success());
@@ -41,7 +55,14 @@ fn native_optimization_rejects_unknown_mode() {
 #[test]
 fn native_optimization_must_not_silently_apply_to_bytecode() {
     let output = Command::new(env!("CARGO_BIN_EXE_nulang"))
-        .args(["--backend", "bytecode", "--native-opt", "small", "--eval", "1 + 2"])
+        .args([
+            "--backend",
+            "bytecode",
+            "--native-opt",
+            "small",
+            "--eval",
+            "1 + 2",
+        ])
         .output()
         .expect("run Nulang CLI");
     assert!(!output.status.success());
