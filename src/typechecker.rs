@@ -5013,6 +5013,55 @@ mod tests {
     }
 
     #[test]
+    fn test_mgu_ground_function_effects_are_not_erased_by_ntir_hash() {
+        let pure = Type::Function {
+            param: Box::new(Type::unit()),
+            ret: Box::new(Type::unit()),
+            effect: EffectRow::empty(),
+            cap: Capability::Ref,
+        };
+        let io = Type::Function {
+            param: Box::new(Type::unit()),
+            ret: Box::new(Type::unit()),
+            effect: EffectRow::singleton(Effect::IO),
+            cap: Capability::Ref,
+        };
+        // NTIR's structural hash intentionally omits effect rows; it must
+        // never be used to establish equality in the source type unifier.
+        assert_eq!(pure.to_ntir().hash(), io.to_ntir().hash());
+        assert!(mgu(&pure, &io, sp()).is_err());
+        assert!(mgu(&io, &pure, sp()).is_err());
+        assert!(mgu(&pure, &pure, sp()).is_ok());
+    }
+
+    #[test]
+    fn test_mgu_ground_function_nested_effects_are_not_erased() {
+        let callback = |effect| Type::Function {
+            param: Box::new(Type::unit()),
+            ret: Box::new(Type::unit()),
+            effect,
+            cap: Capability::Ref,
+        };
+        let expected = Type::Record(vec![(
+            "callback".to_string(),
+            callback(EffectRow::empty()),
+        )]);
+        let actual = Type::Record(vec![(
+            "callback".to_string(),
+            callback(EffectRow::singleton(Effect::FS)),
+        )]);
+        assert!(mgu(&actual, &expected, sp()).is_err());
+    }
+
+    #[test]
+    fn test_mgu_ground_nil_and_unit_remain_distinct() {
+        // NTIR intentionally maps several scalar types to one hash, which
+        // must not make those scalar types interchangeable in the unifier.
+        assert_eq!(Type::nil().to_ntir().hash(), Type::unit().to_ntir().hash());
+        assert!(mgu(&Type::nil(), &Type::unit(), sp()).is_err());
+    }
+
+    #[test]
     fn test_mgu_opaque_nominal_rejects_underlying() {
         let html = Type::Nominal {
             name: "Html".to_string(),
