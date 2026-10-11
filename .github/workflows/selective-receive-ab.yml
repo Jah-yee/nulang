@@ -58,7 +58,7 @@ jobs:
             echo
             echo 'This isolates cold and repeated empty selective-receive latency; active actor throughput is a separate gate.'
             echo
-            echo '### First and repeated empty receive'
+            echo '### First poll, repeated empty polls, and first arrival after an empty poll'
             echo
             echo '```json'
             jq '.cases' selective-receive-ab.json
