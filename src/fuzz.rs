@@ -1032,12 +1032,7 @@ mod tests {
     /// an unsupported-program skip must not satisfy a backend parity test.
     #[test]
     fn differential_nightly_negation_requires_aot_coverage() {
-        for source in [
-            "-3 ** -2",
-            "-(11 / 0)",
-            "-(1 % 0)",
-            "--(1 + 2,)",
-        ] {
+        for source in ["-3 ** -2", "-(11 / 0)", "-(1 % 0)", "--(1 + 2,)"] {
             let outcome = differential_fuzz_one(source);
             assert!(
                 matches!(&outcome, Ok(DiffOutcome::Agreed { aot: true, .. })),
