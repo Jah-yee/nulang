@@ -839,6 +839,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn idle_actor_does_not_reserve_inline_hibernation_snapshot() {
+        let mut actor = Actor::new(123, "sleepy", 0);
+        assert!(std::mem::size_of_val(&actor.hibernation_state)
+            <= std::mem::size_of::<usize>());
+        assert!(actor.hibernation_state.is_none());
+        assert!(!actor.is_hibernated());
+
+        actor.hibernation_state = Some(Box::new(HibernationState {
+            continuation_bytes: Vec::new(),
+            module_hash: [9; 32],
+            hibernated_at_ms: 42,
+            state_fields: HashMap::new(),
+        }));
+        assert!(actor.is_hibernated());
+        assert_eq!(actor.hibernation_state.as_ref().unwrap().module_hash, [9; 32]);
+
+        actor.reset(124, "awake", 0);
+        assert!(!actor.is_hibernated());
+        assert!(actor.hibernation_state.is_none());
+        assert_eq!(actor.id, 124);
+    }
+
+    #[test]
     fn test_actor_new() {
         let actor = Actor::new(1, "test", 0);
         assert_eq!(actor.id, 1);
