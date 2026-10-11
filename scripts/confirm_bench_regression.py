@@ -99,6 +99,14 @@ CRITERION_GROUPS = frozenset(
 
 
 def criterion_display_name(history_name: str) -> str:
+    # Nested groups also flatten their embedded slash in the Criterion
+    # estimates path. Match the most specific prefix first.
+    for history_prefix, display_prefix in (
+        ("vm_perform_direct_", "vm/perform_direct/"),
+        ("vm_perform_", "vm/perform/"),
+    ):
+        if history_name.startswith(history_prefix):
+            return display_prefix + history_name[len(history_prefix):]
     group, separator, remainder = history_name.partition("_")
     if separator and group in CRITERION_GROUPS:
         return f"{group}/{remainder}"
