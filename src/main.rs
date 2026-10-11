@@ -26,6 +26,7 @@
 //!                            handlers, no actor mailbox — requires wasm-backend)
 //!   --out <file>             Output file (WASM backends / --emit-nbc)
 //!   --emit-nbc               Compile <FILE> to a .nbc artifact; don't run
+//!   --emit-exe               Experimental Linux native executable; limited MIR subset
 //!   --emit-behavior-manifest <file>  Emit RFC 0020 behavior sidecar with durable schema metadata
 //!   <FILE>.nbc               Run a pre-compiled .nbc artifact directly
 //!   --verify <src>           Verify .nbc source hash against <src>
@@ -476,6 +477,7 @@ fn main() {
                 }
             }
             "--emit-nbc" => opts.emit_nbc = true,
+            "--emit-exe" => opts.emit_exe = true,
             "--emit-behavior-manifest" => {
                 if i + 1 < args.len() {
                     opts.emit_behavior_manifest = Some(args[i + 1].clone());
@@ -538,6 +540,7 @@ fn main() {
                     "--backend",
                     "--out",
                     "--emit-nbc",
+                    "--emit-exe",
                     "--emit-behavior-manifest",
                     "--behavior-package-name",
                     "--behavior-package-version",
@@ -576,6 +579,10 @@ fn main() {
         i += 1;
     }
 
+    if opts.emit_exe && opts.emit_nbc {
+        eprintln!("Error: --emit-exe and --emit-nbc are mutually exclusive");
+        std::process::exit(1);
+    }
     if opts.emit_behavior_manifest.is_some() && !opts.emit_nbc {
         eprintln!("Error: --emit-behavior-manifest currently requires --emit-nbc");
         std::process::exit(1);
@@ -938,6 +945,39 @@ fn main() {
             }
             return;
         }
+        if opts.emit_exe {
+            #[cfg(feature = "native-codegen")]
+            {
+                if opts.target != "native" {
+                    eprintln!("Error: --emit-exe requires --target native");
+                    std::process::exit(1);
+                }
+                let outcome = (|| -> NuResult<()> {
+                    let (ast, checked) = run_frontend(
+                        &source, Some(path), opts.verbose,
+                        &opts.with_capabilities, opts.deny_warnings,
+                    )?;
+                    let hir = nulang::hir_lower::lower_module(&ast, &checked.inferred_decl_types);
+                    let mir = nulang::mir_lower::lower_module(&hir)?;
+                    let output = opts.out_file.clone().unwrap_or_else(|| {
+                        path.strip_suffix(".nula").unwrap_or(path).to_string()
+                    });
+                    nulang::native_executable::emit_executable(&mir, std::path::Path::new(&output))?;
+                    println!("Wrote native executable to {}", output);
+                    Ok(())
+                })();
+                if let Err(e) = outcome {
+                    print_error(&e, use_color);
+                    std::process::exit(exit_code(&e));
+                }
+            }
+            #[cfg(not(feature = "native-codegen"))]
+            {
+                eprintln!("Error: --emit-exe requires the native-codegen feature");
+                std::process::exit(1);
+            }
+            return;
+        }
         if let Some(n) = opts.bench_count {
             let verbose = opts.verbose;
             let backend = &opts.backend;
@@ -1031,6 +1071,8 @@ struct Options {
     out_file: Option<String>,
     /// Compile the input to a `.nbc` artifact and write it, don't run.
     emit_nbc: bool,
+    /// Generate an experimental standalone native executable on Linux.
+    emit_exe: bool,
     /// Optional RFC 0020 behavior sidecar output path. Currently emitted for
     /// the bytecode artifact path so package builds can bind durable schema
     /// metadata to the same typed program and artifact identity.
@@ -1093,6 +1135,7 @@ impl Default for Options {
             backend: "bytecode".to_string(),
             out_file: None,
             emit_nbc: false,
+            emit_exe: false,
             emit_behavior_manifest: None,
             behavior_package_name: None,
             behavior_package_version: None,
@@ -1168,6 +1211,10 @@ fn print_help() {
         println!("  --out <file>     Output file for WASM backends (default: out.wasm)");
     }
     println!("  --out <file>     Output path for --emit-nbc (default: <FILE> with .nbc extension)");
+    if cfg!(feature = "native-codegen") {
+        println!("  --emit-exe       Experimental Linux executable (literal string IO + straight-line Int)");
+        println!("                   Linked against host libc using cc; not fully static");
+    }
     println!("  --emit-behavior-manifest <file>  Emit RFC 0020 durable-schema behavior sidecar");
     println!("  <FILE>.nbc       Run a pre-compiled .nbc artifact directly (no compiler invoked)");
     println!(
