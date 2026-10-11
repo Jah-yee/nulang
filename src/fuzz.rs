@@ -904,6 +904,29 @@ mod tests {
         }
     }
 
+    // Minimized inputs reproduced on both 2026-10-09 and 2026-10-11 nightly runs.
+    // Require positive native AOT participation: a compile-time skip is not parity.
+    #[test]
+    fn regression_aot_negation_of_runtime_nil() {
+        for source in ["-3 ** -2", "-(11 / 0)", "-(1 % 0)"] {
+            let result = differential_fuzz_one(source);
+            assert!(
+                matches!(&result, Ok(DiffOutcome::Agreed { aot: true, .. })),
+                "native AOT must preserve interpreter error semantics for {source:?}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn regression_aot_nested_negation_preserves_original_error() {
+        let source = "--(1 + 2,)";
+        let result = differential_fuzz_one(source);
+        assert!(
+            matches!(&result, Ok(DiffOutcome::Agreed { aot: true, .. })),
+            "native AOT must preserve the original invalid operand error: {result:?}"
+        );
+    }
+
     /// The WASM-enabled CI lane must prove that the restricted backend
     /// actually participates in the differential oracle. This catches a
     /// regression where every program is silently classified as unsupported
