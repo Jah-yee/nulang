@@ -21,7 +21,11 @@ class ConformanceSelectionTests(unittest.TestCase):
         errors = io.StringIO()
         fake_result = SimpleNamespace(returncode=0, stdout=stdout, stderr="")
         with (
-            patch.object(sys, "argv", [str(RUNNER), prefix]),
+            patch.object(
+                sys,
+                "argv",
+                [str(RUNNER), *(prefix if isinstance(prefix, (list, tuple)) else [prefix])],
+            ),
             patch("os.chdir"),
             patch("subprocess.run", return_value=fake_result) as execute,
             patch("subprocess.check_output", return_value=b'{"target_directory":"/tmp"}'),
@@ -41,6 +45,14 @@ class ConformanceSelectionTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("no conformance fixtures", errors.lower())
         self.assertEqual(calls, 0, "empty selection must not trigger cargo build")
+
+    def test_each_requested_prefix_must_match(self):
+        code, _, errors, calls = self._invoke(
+            ["effrow_01_closed_empty_row_pure", "missing_fixture_prefix_xyz"], "5"
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("missing_fixture_prefix_xyz", errors)
+        self.assertEqual(calls, 0, "a missing prefix must fail before cargo build")
 
     def test_existing_prefix_selects_a_real_fixture(self):
         code, output, errors, calls = self._invoke(
