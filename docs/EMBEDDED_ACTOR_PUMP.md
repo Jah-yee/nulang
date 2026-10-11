@@ -56,9 +56,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 The facade rejects invalid actor IDs, unregistered behaviors, duplicate
 registrations, exceeding the configured actor quota, integer truncation, and
-operations after shutdown. `send_int` does not guarantee durable delivery:
-the underlying runtime may reject messages at admission (such as a full
-mailbox). This is not a persistent-storage API, a C ABI, or an async executor.
+operations after shutdown. `send_int` explicitly returns `HostError::MailboxFull`
+if local mailbox admission fails due to backpressure. An accepted message is
+**not** proof of behavior execution or durable delivery. This is not a
+persistent-storage API, a C ABI, or an async executor.
 
 ## Behavior and limitations
 
