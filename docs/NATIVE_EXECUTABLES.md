@@ -6,13 +6,13 @@ It is **not** the interpreter/JIT-backed `--backend native` path and it is
 
 ## Linux smoke
 
-With Rust, a native C linker (`cc`) and the `native-codegen` Cargo feature:
+With Rust, a native C linker (`cc`) and the opt-in `native-executable` Cargo feature:
 
 ```sh
 cat > hello.nula <<'EOF'
 perform IO.print("Hello from Nulang")
 EOF
-cargo run --locked --release -- --emit-exe --out hello hello.nula
+cargo run --locked --release --features native-executable -- --emit-exe --out hello hello.nula
 ./hello
 file hello
 ldd hello
@@ -44,7 +44,7 @@ NUL-containing string literals are rejected rather than truncated.
 ## Focused validation
 
 ```sh
-cargo test --locked --test native_tiny_executable
+cargo test --locked --no-default-features --features native-executable --test native_tiny_executable
 cargo check --locked --no-default-features
 bash scripts/check_mobile_runtime_profile.sh
 ```
