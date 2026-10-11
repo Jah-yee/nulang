@@ -213,10 +213,13 @@ impl NulangRuntime {
         module_index: Option<usize>,
     ) -> Result<String, String> {
         fn lookup(module: &crate::bytecode::CodeModule, string_id: usize) -> Option<&str> {
-            module.constants.get(string_id).and_then(|constant| match constant {
-                crate::bytecode::Constant::String(text) => Some(text.as_str()),
-                _ => None,
-            })
+            module
+                .constants
+                .get(string_id)
+                .and_then(|constant| match constant {
+                    crate::bytecode::Constant::String(text) => Some(text.as_str()),
+                    _ => None,
+                })
         }
 
         if let Some(module_index) = module_index {
@@ -248,8 +251,7 @@ impl NulangRuntime {
             }
         }
         resolved.map(str::to_owned).ok_or_else(|| {
-            "string value has no compiled module; use nulang_value_to_string_in_module"
-                .to_string()
+            "string value has no compiled module; use nulang_value_to_string_in_module".to_string()
         })
     }
 
@@ -904,7 +906,10 @@ mod tests {
         assert_eq!(value_a.raw, value_b.raw);
 
         let legacy = unsafe { nulang_value_to_string(rt, value_a) };
-        assert!(legacy.is_null(), "legacy lookup must not silently select the last module");
+        assert!(
+            legacy.is_null(),
+            "legacy lookup must not silently select the last module"
+        );
         let error = unsafe { CStr::from_ptr(nulang_last_error(rt)) }
             .to_string_lossy()
             .into_owned();
@@ -912,12 +917,18 @@ mod tests {
 
         let ptr_a = unsafe { nulang_value_to_string_in_module(rt, module_a, value_a) };
         assert!(!ptr_a.is_null());
-        assert_eq!(unsafe { CStr::from_ptr(ptr_a) }.to_str().unwrap(), "from module a");
+        assert_eq!(
+            unsafe { CStr::from_ptr(ptr_a) }.to_str().unwrap(),
+            "from module a"
+        );
         assert!(unsafe { nulang_free_string(rt, ptr_a) });
 
         let ptr_b = unsafe { nulang_value_to_string_in_module(rt, module_b, value_b) };
         assert!(!ptr_b.is_null());
-        assert_eq!(unsafe { CStr::from_ptr(ptr_b) }.to_str().unwrap(), "from module b");
+        assert_eq!(
+            unsafe { CStr::from_ptr(ptr_b) }.to_str().unwrap(),
+            "from module b"
+        );
         assert!(unsafe { nulang_free_string(rt, ptr_b) });
 
         let invalid = unsafe { nulang_value_to_string_in_module(rt, -1, value_a) };
@@ -942,7 +953,10 @@ mod tests {
 
         let ptr = unsafe { nulang_value_to_string(rt, a) };
         assert!(!ptr.is_null());
-        assert_eq!(unsafe { CStr::from_ptr(ptr) }.to_str().unwrap(), "identical");
+        assert_eq!(
+            unsafe { CStr::from_ptr(ptr) }.to_str().unwrap(),
+            "identical"
+        );
         assert!(unsafe { nulang_free_string(rt, ptr) });
         unsafe { nulang_runtime_free(rt) };
     }
