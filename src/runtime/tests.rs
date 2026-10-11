@@ -224,6 +224,24 @@ fn embedded_pump_zero_budget_does_not_execute_messages() {
 }
 
 #[test]
+fn embedded_pump_does_not_wait_for_future_timers() {
+    let mut rt = Runtime::new();
+    let actor_id = rt.spawn_actor(Box::new(Vec::new));
+    declare_test_behavior(&mut rt, actor_id, "timeout");
+
+    // A future pending timer would keep Runtime::run_scheduler in its idle
+    // wait loop for roughly this full delay. Host polling must return now.
+    let timer = rt.timer_wheel.send_after(Duration::from_secs(30), actor_id, 0, vec![]);
+    let started = Instant::now();
+    assert_eq!(rt.pump_ready(1), 0);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "embedded poll blocked on a pending timer"
+    );
+    assert!(rt.timer_wheel.cancel(timer));
+}
+
+#[test]
 fn embedded_pump_idle_returns_without_executing_callback() {
     let mut rt = Runtime::new();
     // The embedding host controls when to poll. The API must not run
