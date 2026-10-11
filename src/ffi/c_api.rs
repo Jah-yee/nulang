@@ -792,8 +792,6 @@ pub unsafe extern "C" fn nulang_runtime_register_native_function(
 /// registry; C embedding runtimes now use isolated per-runtime registries.
 /// Use `nulang_runtime_register_native_function` for embedded callbacks.
 ///
-///
-///
 /// The function pointer must match the supplied parameter and return types.
 /// Use `"__nulang_registered__"` as the sentinel library name in the Nulang
 /// `extern` block when no dynamic library is required.
