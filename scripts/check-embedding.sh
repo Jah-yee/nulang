@@ -23,8 +23,13 @@ for symbol in \
   nulang_value_to_string_in_module \
   nulang_run_owned \
   nulang_call_function_owned \
+  nulang_owned_value_from_module \
+  nulang_owned_value_int_new \
+  nulang_owned_value_int \
+  nulang_owned_value_string_new \
+  nulang_owned_value_to_string \
   nulang_owned_value_release; do
-  if ! nm -D --defined-only "$library" | grep -F " $symbol" > /dev/null; then
+  if ! nm -D --defined-only "$library" | awk -v symbol="$symbol" '$NF == symbol { found=1 } END { exit !found }'; then
     echo "Required C ABI export missing: $symbol" >&2
     exit 1
   fi
