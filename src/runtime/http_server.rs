@@ -5,12 +5,12 @@
 //! Status is always 200; Content-Type is always text/plain.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -558,48 +558,177 @@ pub fn kv_all() -> Vec<(String, String)> {
 // Realtime broadcast registry for SSE (Server-Sent Events).
 // ---------------------------------------------------------------------------
 
-static REALTIME_BROADCAST: OnceLock<Mutex<HashMap<String, BroadcastRoom>>> = OnceLock::new();
+// The experimental in-process SSE transport is intentionally bounded. These
+// limits are per server process, NOT a durable/distributed delivery guarantee.
+const MAX_REALTIME_ROOMS: usize = 128;
+const MAX_REALTIME_ROOM_NAME_BYTES: usize = 128;
+const MAX_REALTIME_HISTORY_MESSAGES: usize = 64;
+const MAX_REALTIME_HISTORY_BYTES: usize = 256 * 1024;
+const MAX_REALTIME_MESSAGE_BYTES: usize = 16 * 1024;
+const MAX_REALTIME_SUBSCRIBERS_PER_ROOM: usize = 32;
+const MAX_REALTIME_SUBSCRIBER_BACKLOG: usize = 16;
 
-fn realtime_broadcast_registry() -> &'static Mutex<HashMap<String, BroadcastRoom>> {
-    REALTIME_BROADCAST.get_or_init(|| Mutex::new(HashMap::new()))
+static REALTIME_BROADCAST: OnceLock<Mutex<RealtimeRegistry>> = OnceLock::new();
+
+fn realtime_broadcast_registry() -> &'static Mutex<RealtimeRegistry> {
+    REALTIME_BROADCAST.get_or_init(|| Mutex::new(RealtimeRegistry::default()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RealtimeLimitError {
+    InvalidRoom,
+    MessageTooLarge,
+    RoomCapacity,
+    SubscriberCapacity,
+}
+
+#[derive(Default)]
+struct RealtimeRegistry {
+    rooms: HashMap<String, BroadcastRoom>,
+    clock: u64,
+    next_subscriber_id: u64,
 }
 
 struct BroadcastRoom {
-    messages: Vec<String>,
-    listeners: Vec<Sender<String>>,
+    messages: VecDeque<String>,
+    replay_bytes: usize,
+    listeners: Vec<(u64, SyncSender<String>)>,
+    last_used: u64,
 }
 
-/// Broadcast a message to every subscriber of a room and keep it in the
-/// room's replay history.
-pub fn realtime_broadcast(room: &str, message: &str) {
-    let mut registry = realtime_broadcast_registry().lock().unwrap();
-    let entry = registry.entry(room.to_string()).or_insert(BroadcastRoom {
-        messages: Vec::new(),
-        listeners: Vec::new(),
-    });
-    entry.messages.push(message.to_string());
+impl RealtimeRegistry {
+    fn validate_room(room: &str) -> Result<(), RealtimeLimitError> {
+        if room.is_empty()
+            || room.len() > MAX_REALTIME_ROOM_NAME_BYTES
+            || !room.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':' | b'/'))
+            || room.split('/').any(|segment| segment.is_empty() || segment == "." || segment == "..")
+        {
+            return Err(RealtimeLimitError::InvalidRoom);
+        }
+        Ok(())
+    }
 
-    let mut keep = Vec::new();
-    for sender in entry.listeners.drain(..) {
-        if sender.send(message.to_string()).is_ok() {
-            keep.push(sender);
+    fn room_mut(&mut self, room: &str) -> Result<&mut BroadcastRoom, RealtimeLimitError> {
+        Self::validate_room(room)?;
+        if !self.rooms.contains_key(room) {
+            if self.rooms.len() >= MAX_REALTIME_ROOMS {
+                // Evict only inactive rooms. Active SSE connections retain their
+                // rooms and fail closed when every slot is occupied.
+                let oldest = self
+                    .rooms
+                    .iter()
+                    .filter(|(_, existing)| existing.listeners.is_empty())
+                    .min_by_key(|(_, existing)| existing.last_used)
+                    .map(|(name, _)| name.clone());
+                if let Some(oldest) = oldest {
+                    self.rooms.remove(&oldest);
+                } else {
+                    return Err(RealtimeLimitError::RoomCapacity);
+                }
+            }
+            self.rooms.insert(
+                room.to_owned(),
+                BroadcastRoom {
+                    messages: VecDeque::new(),
+                    replay_bytes: 0,
+                    listeners: Vec::new(),
+                    last_used: 0,
+                },
+            );
+        }
+        self.clock = self.clock.wrapping_add(1);
+        let entry = self.rooms.get_mut(room).expect("room was inserted above");
+        entry.last_used = self.clock;
+        Ok(entry)
+    }
+
+    fn broadcast(&mut self, room: &str, message: &str) -> Result<(), RealtimeLimitError> {
+        if message.len() > MAX_REALTIME_MESSAGE_BYTES {
+            return Err(RealtimeLimitError::MessageTooLarge);
+        }
+        let entry = self.room_mut(room)?;
+        entry.messages.push_back(message.to_owned());
+        entry.replay_bytes += message.len();
+        while entry.messages.len() > MAX_REALTIME_HISTORY_MESSAGES
+            || entry.replay_bytes > MAX_REALTIME_HISTORY_BYTES
+        {
+            if let Some(oldest) = entry.messages.pop_front() {
+                entry.replay_bytes -= oldest.len();
+            }
+        }
+
+        // Never block a producer on a disconnected or slow browser. Dropping
+        // the sender eventually terminates the corresponding SSE stream.
+        entry
+            .listeners
+            .retain(|(_, sender)| sender.try_send(message.to_owned()).is_ok());
+        Ok(())
+    }
+
+    fn subscribe(
+        &mut self,
+        room: &str,
+    ) -> Result<(u64, Vec<String>, Receiver<String>), RealtimeLimitError> {
+        let entry = self.room_mut(room)?;
+        if entry.listeners.len() >= MAX_REALTIME_SUBSCRIBERS_PER_ROOM {
+            return Err(RealtimeLimitError::SubscriberCapacity);
+        }
+        let (tx, rx) = sync_channel(MAX_REALTIME_SUBSCRIBER_BACKLOG);
+        let history: Vec<String> = entry.messages.iter().cloned().collect();
+        self.next_subscriber_id = self.next_subscriber_id.wrapping_add(1);
+        let id = self.next_subscriber_id;
+        self.rooms.get_mut(room).expect("room exists").listeners.push((id, tx));
+        Ok((id, history, rx))
+    }
+
+    fn unsubscribe(&mut self, room: &str, id: u64) {
+        if let Some(entry) = self.rooms.get_mut(room) {
+            entry.listeners.retain(|(subscriber_id, _)| *subscriber_id != id);
         }
     }
-    entry.listeners = keep;
 }
 
-/// Subscribe to a room, returning the replay history and a receiver for
-/// future messages.
-pub fn realtime_subscribe(room: &str) -> (Vec<String>, Receiver<String>) {
-    let (tx, rx) = channel::<String>();
-    let mut registry = realtime_broadcast_registry().lock().unwrap();
-    let entry = registry.entry(room.to_string()).or_insert(BroadcastRoom {
-        messages: Vec::new(),
-        listeners: Vec::new(),
-    });
-    let history = entry.messages.clone();
-    entry.listeners.push(tx);
-    (history, rx)
+/// Lifetime guard that removes a subscriber immediately when the SSE stream
+/// exits, even when no further messages arrive for the room.
+struct RealtimeSubscription {
+    room: String,
+    id: u64,
+    history: Vec<String>,
+    rx: Receiver<String>,
+}
+
+impl Drop for RealtimeSubscription {
+    fn drop(&mut self) {
+        if let Ok(mut registry) = realtime_broadcast_registry().lock() {
+            registry.unsubscribe(&self.room, self.id);
+        }
+    }
+}
+
+/// Broadcast to a bounded local room. Oversize messages or exhausted room
+/// capacity are logged, never buffered indefinitely. This remains demo-only:
+/// applications needing delivery/authorization guarantees must supply them.
+pub fn realtime_broadcast(room: &str, message: &str) {
+    if let Err(error) = realtime_broadcast_registry()
+        .lock()
+        .expect("realtime registry poisoned")
+        .broadcast(room, message)
+    {
+        eprintln!("nulang realtime broadcast rejected for room {room:?}: {error:?}");
+    }
+}
+
+fn realtime_subscribe(room: &str) -> Result<RealtimeSubscription, RealtimeLimitError> {
+    let (id, history, rx) = realtime_broadcast_registry()
+        .lock()
+        .expect("realtime registry poisoned")
+        .subscribe(room)?;
+    Ok(RealtimeSubscription {
+        room: room.to_owned(),
+        id,
+        history,
+        rx,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1005,17 +1134,32 @@ impl WebDevServer {
     }
 
     fn serve_sse(room: &str, stream: &mut TcpStream, shutdown: Arc<AtomicBool>) {
-        let (history, rx) = realtime_subscribe(room);
+        let subscription = match realtime_subscribe(room) {
+            Ok(subscription) => subscription,
+            Err(error) => {
+                let status = if error == RealtimeLimitError::InvalidRoom { 400 } else { 503 };
+                HttpServerState::write_response(
+                    stream,
+                    &HttpResponse {
+                        status,
+                        headers: vec![("Content-Type".into(), "text/plain; charset=utf-8".into())],
+                        body: format!("SSE subscription rejected: {error:?}").into_bytes(),
+                    },
+                );
+                return;
+            }
+        };
         let mut out = Vec::new();
         out.extend_from_slice(b"HTTP/1.1 200 OK\r\n");
         out.extend_from_slice(b"Content-Type: text/event-stream\r\n");
         out.extend_from_slice(b"Cache-Control: no-cache\r\n");
+        out.extend_from_slice(b"X-Content-Type-Options: nosniff\r\n");
         out.extend_from_slice(b"Connection: keep-alive\r\n");
         out.extend_from_slice(b"\r\n");
         let _ = stream.write_all(&out);
 
-        for msg in history {
-            if Self::write_sse_event(stream, &msg).is_err() {
+        for msg in &subscription.history {
+            if Self::write_sse_event(stream, msg).is_err() {
                 return;
             }
         }
@@ -1024,7 +1168,7 @@ impl WebDevServer {
             if shutdown.load(Ordering::Relaxed) {
                 break;
             }
-            match rx.recv_timeout(Duration::from_millis(100)) {
+            match subscription.rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(msg) => {
                     if Self::write_sse_event(stream, &msg).is_err() {
                         break;
@@ -1049,33 +1193,16 @@ impl WebDevServer {
         output_dir: Option<&Path>,
         path: &str,
     ) -> HttpResponse {
-        let trimmed = path.trim_start_matches('/');
-        let file_path = static_dir
-            .map(|d| {
-                let p = d.join(trimmed);
-                if trimmed.is_empty() || p.is_dir() {
-                    d.join("index.html")
-                } else {
-                    p
-                }
-            })
-            .filter(|p| p.is_file())
-            .or_else(|| {
-                output_dir
-                    .map(|d| {
-                        let p = d.join(trimmed);
-                        if trimmed.is_empty() || p.is_dir() {
-                            d.join("index.html")
-                        } else {
-                            p
-                        }
-                    })
-                    .filter(|p| p.is_file())
-            });
+        // The raw request target may include a query string; it is not a
+        // filesystem path. Reject parent/current/prefix components outright.
+        let relative = path.split('?').next().unwrap_or("").trim_start_matches('/');
+        let candidate = static_dir
+            .and_then(|root| safe_static_candidate(root, relative))
+            .or_else(|| output_dir.and_then(|root| safe_static_candidate(root, relative)));
 
-        if let Some(p) = file_path {
-            if let Ok(data) = std::fs::read(&p) {
-                let content_type = guess_content_type(&p);
+        if let Some(file) = candidate {
+            if let Ok(data) = std::fs::read(&file) {
+                let content_type = guess_content_type(&file);
                 return HttpResponse {
                     status: 200,
                     headers: vec![("Content-Type".into(), content_type.into())],
@@ -1088,6 +1215,29 @@ impl WebDevServer {
             headers: vec![("Content-Type".into(), "text/plain; charset=utf-8".into())],
             body: b"Not found".to_vec(),
         }
+    }
+}
+
+/// Resolve existing files against a canonical static root. Reject traversal
+/// and symlinks resolving outside that root; configured static directories
+/// must themselves be trusted and not writable by untrusted callers.
+fn safe_static_candidate(root: &Path, relative: &str) -> Option<PathBuf> {
+    let rel = Path::new(relative);
+    if rel.components().any(|part| !matches!(part, Component::Normal(_))) {
+        return None;
+    }
+    let root = root.canonicalize().ok()?;
+    let candidate = root.join(rel);
+    let candidate = if relative.is_empty() || candidate.is_dir() {
+        candidate.join("index.html")
+    } else {
+        candidate
+    };
+    let resolved = candidate.canonicalize().ok()?;
+    if resolved.starts_with(&root) && resolved.is_file() {
+        Some(resolved)
+    } else {
+        None
     }
 }
 
@@ -1227,8 +1377,8 @@ mod tests {
     fn test_realtime_broadcast_history() {
         let room = "test-room";
         realtime_broadcast(room, "hello");
-        let (history, _rx) = realtime_subscribe(room);
-        assert_eq!(history, vec!["hello"]);
+        let subscription = realtime_subscribe(room).unwrap();
+        assert_eq!(subscription.history, vec!["hello"]);
     }
 
     #[test]
