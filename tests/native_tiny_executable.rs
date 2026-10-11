@@ -318,3 +318,28 @@ fn emit_exe_rejects_precompiled_bytecode_without_running_it() {
     assert!(!artifact.exists());
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn dash_prefixed_output_directory_does_not_turn_linker_input_into_option() {
+    // A relative path beginning with '-' must not be passed as a positional
+    // linker argument: GCC/ld can treat it as a command-line option.
+    let dir = test_dir();
+    let output_dir = dir.join("-native-output");
+    fs::create_dir(&output_dir).unwrap();
+    fs::write(dir.join("main.nula"), "perform IO.print(\"safe linker path\")").unwrap();
+    let built = Command::new(env!("CARGO_BIN_EXE_nulang"))
+        .current_dir(&dir)
+        .args(["--emit-exe", "--out", "-native-output/hello", "main.nula"])
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "compiler stderr: {}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let binary = output_dir.join("hello");
+    let executed = Command::new(binary).output().unwrap();
+    assert!(executed.status.success());
+    assert_eq!(executed.stdout, b"safe linker path\n");
+    fs::remove_dir_all(dir).unwrap();
+}
