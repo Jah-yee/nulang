@@ -3,6 +3,169 @@
 //! Native actor behaviors are function pointers today, not captured closures.
 //! No C actor ABI or automatic background scheduler is implied.
 
+use std::collections::HashSet;
+use std::fmt;
+
+use super::{Actor, Runtime};
+use crate::vm::Value;
+
+/// Errors returned by the local embedded actor host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostError {
+    Stopped,
+    ActorLimitReached,
+    UnknownActor,
+    UnknownBehavior,
+    IntegerOutOfRange,
+}
+
+impl fmt::Display for HostError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::Stopped => "embedded actor host is stopped",
+            Self::ActorLimitReached => "embedded actor limit reached",
+            Self::UnknownActor => "unknown embedded actor",
+            Self::UnknownBehavior => "unknown embedded actor behavior",
+            Self::IntegerOutOfRange => "integer does not fit Nulang's 48-bit Int representation",
+        };
+        f.write_str(message)
+    }
+}
+
+impl std::error::Error for HostError {}
+
+/// Host-owned, explicitly polled local actor runtime.
+///
+/// Unlike `Runtime::run_scheduler`, polling does not wait for future timers.
+/// This host currently accepts primitive integer state and message arguments;
+/// registered native behaviors remain trusted in-process Rust function
+/// pointers. It is not an isolation or durability boundary.
+pub struct EmbeddedActorHost {
+    runtime: Option<Runtime>,
+    owned_actors: HashSet<u64>,
+    max_actors: usize,
+}
+
+impl EmbeddedActorHost {
+    /// Start a local actor runtime with a hard limit on host-created actors.
+    /// Setting zero disables actor creation while still allowing poll/shutdown.
+    pub fn new(max_actors: usize) -> Self {
+        Self {
+            runtime: Some(Runtime::new()),
+            owned_actors: HashSet::new(),
+            max_actors,
+        }
+    }
+
+    fn runtime_mut(&mut self) -> Result<&mut Runtime, HostError> {
+        self.runtime.as_mut().ok_or(HostError::Stopped)
+    }
+
+    fn checked_int(value: i64) -> Result<Value, HostError> {
+        let encoded = Value::int(value);
+        if encoded.as_int() != Some(value) {
+            return Err(HostError::IntegerOutOfRange);
+        }
+        Ok(encoded)
+    }
+
+    /// Spawn a local native actor with integer-valued state fields.
+    ///
+    /// A rejected spawn does not consume an actor quota slot.
+    pub fn spawn(&mut self, initial_state: Vec<(String, i64)>) -> Result<u64, HostError> {
+        self.runtime_mut()?;
+        if self.owned_actors.len() >= self.max_actors {
+            return Err(HostError::ActorLimitReached);
+        }
+
+        let state = initial_state
+            .into_iter()
+            .map(|(name, value)| Self::checked_int(value).map(|value| (name, value)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let actor_id = self.runtime_mut()?.spawn_actor(Box::new(move || state));
+        self.owned_actors.insert(actor_id);
+        Ok(actor_id)
+    }
+
+    /// Register a trusted, native function pointer as a named actor behavior.
+    ///
+    /// No closure capture, serialized module, or foreign function pointer is
+    /// supported by this initial embedding API.
+    pub fn register_behavior(
+        &mut self,
+        actor_id: u64,
+        name: &str,
+        handler: fn(&mut Actor, &[Value]),
+    ) -> Result<(), HostError> {
+        self.runtime_mut()?;
+        if !self.owned_actors.contains(&actor_id) {
+            return Err(HostError::UnknownActor);
+        }
+        let actor = self
+            .runtime_mut()?
+            .actors
+            .get_mut(&actor_id)
+            .ok_or(HostError::UnknownActor)?;
+        actor.register_behavior(name, handler);
+        Ok(())
+    }
+
+    /// Send an integer-only message to an owned local actor.
+    ///
+    /// Success means the message was submitted to the runtime's mailbox
+    /// admission path, not that it was executed or durably acknowledged.
+    pub fn send_int(
+        &mut self,
+        actor_id: u64,
+        name: &str,
+        args: &[i64],
+    ) -> Result<(), HostError> {
+        self.runtime_mut()?;
+        if !self.owned_actors.contains(&actor_id) {
+            return Err(HostError::UnknownActor);
+        }
+        let actor = self
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.actors.get(&actor_id))
+            .ok_or(HostError::UnknownActor)?;
+        if !actor.behavior_table.iter().any(|behavior| behavior.name == name) {
+            return Err(HostError::UnknownBehavior);
+        }
+        let values = args
+            .iter()
+            .copied()
+            .map(Self::checked_int)
+            .collect::<Result<Vec<_>, _>>()?;
+        self.runtime_mut()?.send_message(actor_id, name, &values);
+        Ok(())
+    }
+
+    /// Read a primitive integer state field, or None if the field is absent
+    /// or is not a primitive integer.
+    pub fn get_int_field(&self, actor_id: u64, field: &str) -> Result<Option<i64>, HostError> {
+        let runtime = self.runtime.as_ref().ok_or(HostError::Stopped)?;
+        if !self.owned_actors.contains(&actor_id) {
+            return Err(HostError::UnknownActor);
+        }
+        let actor = runtime.actors.get(&actor_id).ok_or(HostError::UnknownActor)?;
+        Ok(actor.get_state_field(field).and_then(|value| value.as_int()))
+    }
+
+    /// Run at most `max_turns` ready actor messages on the calling thread.
+    /// A zero budget performs no work; future timers require a subsequent poll.
+    pub fn poll(&mut self, max_turns: usize) -> Result<usize, HostError> {
+        Ok(self.runtime_mut()?.pump_ready(max_turns))
+    }
+
+    /// Stop host operations and drop all locally owned actors and their state.
+    /// Idempotent; does not persist actor state or await distributed messages.
+    pub fn shutdown(&mut self) {
+        self.runtime.take();
+        self.owned_actors.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
