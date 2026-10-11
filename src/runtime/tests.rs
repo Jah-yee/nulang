@@ -226,12 +226,11 @@ fn embedded_pump_zero_budget_does_not_execute_messages() {
 #[test]
 fn embedded_pump_does_not_wait_for_future_timers() {
     let mut rt = Runtime::new();
-    let actor_id = rt.spawn_actor(Box::new(Vec::new));
-    declare_test_behavior(&mut rt, actor_id, "timeout");
 
     // A future pending timer would keep Runtime::run_scheduler in its idle
     // wait loop for roughly this full delay. Host polling must return now.
-    let timer = rt.timer_wheel.send_after(Duration::from_secs(30), actor_id, 0, vec![]);
+    // This timer does not fire during the test, so it needs no live target.
+    let timer = rt.timer_wheel.send_after(Duration::from_secs(30), 0, 0, vec![]);
     let started = Instant::now();
     assert_eq!(rt.pump_ready(1), 0);
     assert!(
