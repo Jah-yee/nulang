@@ -18,6 +18,7 @@
 //! 5. `instantiate` creates fresh type variables from schemes
 
 use crate::ast::*;
+use crate::effect_row_solver::EffectRowSolver;
 use crate::types::*;
 use std::collections::HashSet;
 
@@ -390,6 +391,108 @@ fn unify_actor_ref_attenuation(
         )?;
         subst = compose_subst(&s, &subst);
     }
+    Ok(subst)
+}
+
+/// Specialize a callback parameter's open *allowance* for one application.
+///
+/// This is intentionally directional: an unknown actual tail cannot be
+/// assigned to a closed contract. A fresh solver is shared across all callback
+/// arguments of the same call, so constraints on the same expected tail must
+/// agree. Do not retain it across calls: existing HM instantiation does not
+/// freshen every row variable in a polymorphic scheme.
+fn constrain_callback_argument(
+    found: &Type,
+    expected: &Type,
+    span: Span,
+    solver: &mut EffectRowSolver,
+) -> NuResult<Substitution> {
+    let mut candidate = solver.clone();
+    let solve_error = |error: crate::effect_row_solver::EffectRowSolveError| {
+        NuError::type_error(format!("effect-row constraint: {error}"), span)
+    };
+    let actual = candidate.apply_to_type(found).map_err(solve_error)?;
+    let permitted = candidate.apply_to_type(expected).map_err(solve_error)?;
+    let (
+        Type::Function {
+            effect: actual_row, ..
+        },
+        Type::Function {
+            effect: allowed_row, ..
+        },
+    ) = (&actual, &permitted)
+    else {
+        return mgu_assignable(&actual, &permitted, span);
+    };
+
+    if !crate::effect_checker::effect_row_subset(actual_row, allowed_row) {
+        let EffectRow::Open(allowed_known, allowed_tail) = allowed_row else {
+            return Err(NuError::type_mismatch(
+                format!("callback with effects {allowed_row}"),
+                format!("callback with effects {actual_row}"),
+                span,
+            ));
+        };
+        let needed = actual_row
+            .effects()
+            .iter()
+            .filter(|eff| !allowed_known.contains(eff))
+            .cloned()
+            .collect::<Vec<_>>();
+        let extension = match actual_row {
+            EffectRow::Closed(_) => EffectRow::Closed(needed),
+            EffectRow::Open(_, actual_tail) if actual_tail != allowed_tail => {
+                EffectRow::Open(needed, *actual_tail)
+            }
+            // Without a row-lacks constraint, specializing a shared tail
+            // cannot prove an unknown effect is permitted. Stay fail-closed.
+            _ => {
+                return Err(NuError::type_mismatch(
+                    format!("callback with effects {allowed_row}"),
+                    format!("callback with effects {actual_row}"),
+                    span,
+                ));
+            }
+        };
+        candidate.bind(*allowed_tail, extension).map_err(solve_error)?;
+    }
+
+    let actual = candidate.apply_to_type(&actual).map_err(solve_error)?;
+    let permitted = candidate.apply_to_type(&permitted).map_err(solve_error)?;
+    let (
+        Type::Function {
+            param,
+            ret,
+            cap,
+            effect: actual_effect,
+        },
+        Type::Function {
+            effect: allowed_effect,
+            ..
+        },
+    ) = (&actual, &permitted)
+    else {
+        unreachable!("substitution preserves the function type constructor")
+    };
+    if !crate::effect_checker::effect_row_subset(actual_effect, allowed_effect) {
+        return Err(NuError::type_mismatch(
+            format!("callback with effects {allowed_effect}"),
+            format!("callback with effects {actual_effect}"),
+            span,
+        ));
+    }
+
+    // Effect inclusion was proved directionally. Normalize only this effect
+    // field for symmetric HM unification, without replacing the callback's
+    // parameter type, return type, or capability.
+    let adapted = Type::Function {
+        param: param.clone(),
+        ret: ret.clone(),
+        effect: allowed_effect.clone(),
+        cap: *cap,
+    };
+    let subst = mgu(&adapted, &permitted, span)?;
+    *solver = candidate;
     Ok(subst)
 }
 
@@ -2348,6 +2451,8 @@ impl TypeChecker {
         let (s1, func_ty) = self.infer_expr(ctx, func)?;
         let mut subst = s1;
         let mut arg_types = vec![];
+        // Rows are specialized per call, never across unrelated invocations.
+        let mut row_solver = EffectRowSolver::new();
 
         // Infer each argument
         for arg in args {
@@ -2430,11 +2535,24 @@ impl TypeChecker {
                         || (matches!(found, Type::Function { .. })
                             && matches!(expected, Type::Function { .. }))
                     {
-                        let s_att = mgu_assignable(
-                            &apply_subst(found, &subst),
-                            &apply_subst(expected, &subst),
-                            span,
-                        )?;
+                        let resolved_found = row_solver
+                            .apply_to_type(&apply_subst(found, &subst))
+                            .map_err(|e| NuError::type_error(format!("effect-row constraint: {e}"), span))?;
+                        let resolved_expected = row_solver
+                            .apply_to_type(&apply_subst(expected, &subst))
+                            .map_err(|e| NuError::type_error(format!("effect-row constraint: {e}"), span))?;
+                        let s_att = if matches!((&resolved_found, &resolved_expected),
+                            (Type::Function { .. }, Type::Function { .. }))
+                        {
+                            constrain_callback_argument(
+                                &resolved_found,
+                                &resolved_expected,
+                                span,
+                                &mut row_solver,
+                            )?
+                        } else {
+                            mgu_assignable(&resolved_found, &resolved_expected, span)?
+                        };
                         subst = compose_subst(&s_att, &subst);
                         // The directional check above proved that this wider
                         // reference is safe at the required narrower view.
@@ -2460,7 +2578,9 @@ impl TypeChecker {
         // Preserve the function's effect row instead of forcing it to empty.
         // If the function type is not yet known, use a fresh open row so that
         // row-polymorphic functions can still unify.
-        let func_ty_subst = apply_subst(&func_ty, &subst);
+        let func_ty_subst = row_solver
+            .apply_to_type(&apply_subst(&func_ty, &subst))
+            .map_err(|e| NuError::type_error(format!("effect-row constraint: {e}"), span))?;
         let expected_effect = match &func_ty_subst {
             Type::Function { effect, .. } => effect.clone(),
             _ => EffectRow::Open(vec![], Region::fresh()),
@@ -2477,7 +2597,10 @@ impl TypeChecker {
         let s2 = mgu(&func_ty_subst, &expected, span)?;
         let final_subst = compose_subst(&s2, &subst);
 
-        Ok((final_subst.clone(), apply_subst(&result_ty, &final_subst)))
+        let resolved_ret = row_solver
+            .apply_to_type(&apply_subst(&result_ty, &final_subst))
+            .map_err(|e| NuError::type_error(format!("effect-row constraint: {e}"), span))?;
+        Ok((final_subst, resolved_ret))
     }
 
     /// Infer the type of a let binding.
