@@ -600,8 +600,12 @@ impl RealtimeRegistry {
     fn validate_room(room: &str) -> Result<(), RealtimeLimitError> {
         if room.is_empty()
             || room.len() > MAX_REALTIME_ROOM_NAME_BYTES
-            || !room.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':' | b'/'))
-            || room.split('/').any(|segment| segment.is_empty() || segment == "." || segment == "..")
+            || !room.bytes().all(|b| {
+                b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':' | b'/')
+            })
+            || room
+                .split('/')
+                .any(|segment| segment.is_empty() || segment == "." || segment == "..")
         {
             return Err(RealtimeLimitError::InvalidRoom);
         }
@@ -677,7 +681,11 @@ impl RealtimeRegistry {
         let history: Vec<String> = entry.messages.iter().cloned().collect();
         self.next_subscriber_id = self.next_subscriber_id.wrapping_add(1);
         let id = self.next_subscriber_id;
-        self.rooms.get_mut(room).expect("room exists").listeners.push((id, tx));
+        self.rooms
+            .get_mut(room)
+            .expect("room exists")
+            .listeners
+            .push((id, tx));
         Ok((id, history, rx))
     }
 
@@ -1390,20 +1398,38 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("nulang-web-root-{}-{nonce}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("nulang-web-root-{}-{nonce}", std::process::id()));
         let public = dir.join("public");
         std::fs::create_dir_all(&public).unwrap();
         std::fs::write(public.join("index.html"), "public").unwrap();
         std::fs::write(dir.join("private.txt"), "sensitive").unwrap();
 
-        assert_eq!(WebDevServer::serve_static(Some(&public), None, "/index.html").status, 200);
-        assert_eq!(WebDevServer::serve_static(Some(&public), None, "/../private.txt").status, 404);
-        assert_eq!(WebDevServer::serve_static(Some(&public), None, "/inside/../../private.txt").status, 404);
+        assert_eq!(
+            WebDevServer::serve_static(Some(&public), None, "/index.html").status,
+            200
+        );
+        assert_eq!(
+            WebDevServer::serve_static(Some(&public), None, "/../private.txt").status,
+            404
+        );
+        assert_eq!(
+            WebDevServer::serve_static(Some(&public), None, "/inside/../../private.txt").status,
+            404
+        );
+        assert_eq!(
+            WebDevServer::serve_static(Some(&public), None, "/index.html?v=1").status,
+            200
+        );
 
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(dir.join("private.txt"), public.join("alias.txt")).unwrap();
-            assert_eq!(WebDevServer::serve_static(Some(&public), None, "/alias.txt").status, 404);
+            std::os::unix::fs::symlink(dir.join("private.txt"), public.join("alias.txt"))
+                .unwrap();
+            assert_eq!(
+                WebDevServer::serve_static(Some(&public), None, "/alias.txt").status,
+                404
+            );
         }
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1413,21 +1439,29 @@ mod tests {
         let mut registry = RealtimeRegistry::default();
         let (_id, _history, slow) = registry.subscribe("unit:bounded").unwrap();
         for n in 0..(MAX_REALTIME_HISTORY_MESSAGES + MAX_REALTIME_SUBSCRIBER_BACKLOG + 4) {
-            registry.broadcast("unit:bounded", &format!("event-{n}")).unwrap();
+            registry
+                .broadcast("unit:bounded", &format!("event-{n}"))
+                .unwrap();
         }
         let room = registry.rooms.get("unit:bounded").unwrap();
         assert_eq!(room.messages.len(), MAX_REALTIME_HISTORY_MESSAGES);
         assert!(room.replay_bytes <= MAX_REALTIME_HISTORY_BYTES);
-        assert!(room.listeners.is_empty(), "slow client must be disconnected, not buffered forever");
+        assert!(
+            room.listeners.is_empty(),
+            "slow client must be disconnected, not buffered forever"
+        );
         assert!(slow.try_iter().count() <= MAX_REALTIME_SUBSCRIBER_BACKLOG);
 
         let (_id, replay, _live) = registry.subscribe("unit:bounded").unwrap();
         assert_eq!(replay.len(), MAX_REALTIME_HISTORY_MESSAGES);
-        assert_eq!(
-            replay.last().map(String::as_str),
-            Some(format!("event-{}", MAX_REALTIME_HISTORY_MESSAGES + MAX_REALTIME_SUBSCRIBER_BACKLOG + 3).as_str())
+        let latest =
+            format!("event-{}", MAX_REALTIME_HISTORY_MESSAGES + MAX_REALTIME_SUBSCRIBER_BACKLOG + 3);
+        assert_eq!(replay.last().map(String::as_str), Some(latest.as_str()));
+        assert!(
+            registry
+                .broadcast("unit:bounded", &"x".repeat(MAX_REALTIME_MESSAGE_BYTES + 1))
+                .is_err()
         );
-        assert!(registry.broadcast("unit:bounded", &"x".repeat(MAX_REALTIME_MESSAGE_BYTES + 1)).is_err());
     }
 
     #[test]
@@ -1435,12 +1469,17 @@ mod tests {
         let mut registry = RealtimeRegistry::default();
         for n in 0..32 {
             registry
-                .broadcast("unit:bytes", &format!("{n:02}{}", "x".repeat(MAX_REALTIME_MESSAGE_BYTES - 2)))
+                .broadcast(
+                    "unit:bytes",
+                    &format!("{n:02}{}", "x".repeat(MAX_REALTIME_MESSAGE_BYTES - 2)),
+                )
                 .unwrap();
         }
         let room = registry.rooms.get("unit:bytes").unwrap();
         assert!(room.replay_bytes <= MAX_REALTIME_HISTORY_BYTES);
-        assert!(room.messages.len() <= MAX_REALTIME_HISTORY_BYTES / MAX_REALTIME_MESSAGE_BYTES);
+        assert!(
+            room.messages.len() <= MAX_REALTIME_HISTORY_BYTES / MAX_REALTIME_MESSAGE_BYTES
+        );
     }
 
     #[test]
@@ -1452,7 +1491,10 @@ mod tests {
             active.push(receiver);
         }
         assert_eq!(registry.rooms.len(), MAX_REALTIME_ROOMS);
-        assert_eq!(registry.broadcast("active:new", "message"), Err(RealtimeLimitError::RoomCapacity));
+        assert_eq!(
+            registry.broadcast("active:new", "message"),
+            Err(RealtimeLimitError::RoomCapacity)
+        );
         assert_eq!(registry.rooms.len(), MAX_REALTIME_ROOMS);
     }
 
@@ -1464,7 +1506,10 @@ mod tests {
         }
         registry.broadcast("unit:new", "recent").unwrap();
         assert_eq!(registry.rooms.len(), MAX_REALTIME_ROOMS);
-        assert!(!registry.rooms.contains_key("unit:0"), "oldest room without subscribers is evicted");
+        assert!(
+            !registry.rooms.contains_key("unit:0"),
+            "oldest room without subscribers is evicted"
+        );
 
         let mut subscriptions = Vec::new();
         for _ in 0..MAX_REALTIME_SUBSCRIBERS_PER_ROOM {
