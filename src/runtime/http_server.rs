@@ -181,7 +181,8 @@ impl HttpServerState {
                     let mut req = httparse::Request::new(&mut headers);
                     match req.parse(&buf[..n]) {
                         Ok(httparse::Status::Complete(body_offset)) => {
-                            let Some(method) = HttpMethod::from_str(req.method.unwrap_or("")) else {
+                            let Some(method) = HttpMethod::from_str(req.method.unwrap_or(""))
+                            else {
                                 HttpServerState::write_response(
                                     &mut stream,
                                     &HttpResponse {
@@ -879,7 +880,8 @@ impl WebDevServer {
                     let mut req = httparse::Request::new(&mut headers);
                     match req.parse(&buf[..n]) {
                         Ok(httparse::Status::Complete(body_offset)) => {
-                            let Some(method) = HttpMethod::from_str(req.method.unwrap_or("")) else {
+                            let Some(method) = HttpMethod::from_str(req.method.unwrap_or(""))
+                            else {
                                 HttpServerState::write_response(
                                     &mut stream,
                                     &HttpResponse {
@@ -1250,7 +1252,9 @@ mod tests {
     fn web_dev_server_rejects_foreign_posts_and_unknown_http_methods_over_tcp() {
         fn send(port: u16, raw: &str) -> String {
             let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
             stream.write_all(raw.as_bytes()).unwrap();
             let mut response = String::new();
             stream.read_to_string(&mut response).unwrap();
@@ -1295,7 +1299,9 @@ mod tests {
         assert_eq!(rejected.status, 403);
         assert!(String::from_utf8_lossy(&rejected.body).contains("invalid request origin"));
 
-        request.headers.push(("Origin".into(), "http://localhost:8080".into()));
+        request
+            .headers
+            .push(("Origin".into(), "http://localhost:8080".into()));
         assert!(unsafe_origin_response(&request, local, None).is_none());
         request.method = HttpMethod::Get;
         request.headers.clear();
