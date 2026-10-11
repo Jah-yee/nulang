@@ -33,6 +33,8 @@ pub struct NulangRuntime {
     module_handles: Vec<usize>,
     /// Source-hash -> unique compiled module index.
     compile_cache: HashMap<[u8; 32], usize>,
+    /// Native callbacks and loaded libraries belong to this embedding instance.
+    ffi_registry: std::sync::Arc<std::sync::Mutex<super::native::FfiRegistry>>,
     last_error: Option<String>,
     /// Holds the CString backing `nulang_last_error`.
     error_cstring: Option<CString>,
@@ -46,6 +48,9 @@ impl NulangRuntime {
             modules: Vec::new(),
             module_handles: Vec::new(),
             compile_cache: HashMap::new(),
+            ffi_registry: std::sync::Arc::new(std::sync::Mutex::new(
+                super::native::FfiRegistry::new(),
+            )),
             last_error: None,
             error_cstring: None,
             string_cache: Vec::new(),
@@ -110,6 +115,7 @@ impl NulangRuntime {
         let module_index = self.module_index_for_handle(module_handle)?;
         let module = self.modules.get(module_index)?.clone();
         let mut vm = VM::new();
+        vm.set_ffi_registry(self.ffi_registry.clone());
         vm.load_module(module);
         match vm.run() {
             Ok(value) => Some(self.stabilize_string_value(value, &vm, module_handle)),
@@ -131,6 +137,7 @@ impl NulangRuntime {
         let module = self.modules.get(module_index)?.clone();
         let offset = module.function_offset_by_name(name)?;
         let mut vm = VM::new();
+        vm.set_ffi_registry(self.ffi_registry.clone());
         vm.load_module(module);
         let mut arg_values = Vec::with_capacity(args.len());
         for &arg in args {
@@ -711,7 +718,81 @@ pub unsafe extern "C" fn nulang_value_to_string_in_module(
     }
 }
 
-/// Register a native C function so it can be called from Nulang.
+/// Register a native C callback scoped to a single embedded runtime.
+///
+/// Names registered here cannot be resolved by other embedded runtimes.
+/// The callback pointer must remain valid until the owning runtime is freed.
+/// All runtime, string and signature pointers must be valid for the call.
+/// Returns 0 on success, -1 on error; inspect `nulang_last_error`.
+///
+/// # Safety
+/// `runtime` must be valid, `name` a null-terminated UTF-8 string, `ptr`
+/// a valid function with exactly the provided C signature, and `params`
+/// must contain `param_count` initialized valid CType entries if nonempty.
+#[no_mangle]
+pub unsafe extern "C" fn nulang_runtime_register_native_function(
+    runtime: *mut NulangRuntime,
+    name: *const c_char,
+    ptr: *const c_void,
+    params: *const super::marshal::CType,
+    param_count: usize,
+    ret: super::marshal::CType,
+) -> i32 {
+    if runtime.is_null() {
+        return -1;
+    }
+    // SAFETY: caller supplies a live and exclusively accessed runtime.
+    let rt = unsafe { &mut *runtime };
+    rt.clear_error();
+    if name.is_null() || ptr.is_null() || (param_count > 0 && params.is_null()) {
+        rt.last_error = Some("invalid native callback arguments".to_string());
+        return -1;
+    }
+    // SAFETY: caller guarantees a valid nul-terminated C string.
+    let name_str = match unsafe { CStr::from_ptr(name).to_str() } {
+        Ok(name) => name,
+        Err(_) => {
+            rt.last_error = Some("native callback name is not valid UTF-8".to_string());
+            return -1;
+        }
+    };
+    let params_slice = if param_count == 0 {
+        &[]
+    } else {
+        // SAFETY: caller guarantees an initialized array of valid CType entries.
+        unsafe { std::slice::from_raw_parts(params, param_count) }
+    };
+    let signature = super::marshal::Signature::new(params_slice.to_vec(), ret);
+    // SAFETY: the embedding host guarantees that ptr matches signature and
+    // that the callback remains live until the runtime is destroyed.
+    let function = unsafe {
+        super::native::NativeFunction::new(
+            ptr,
+            signature,
+            None,
+            name_str.to_string(),
+        )
+    };
+    let registration = rt
+        .ffi_registry
+        .lock()
+        .map(|mut registry| registry.register(function));
+    match registration {
+        Ok(()) => 0,
+        Err(_) => {
+            rt.last_error = Some("embedded FFI registry lock failed".to_string());
+            -1
+        }
+    }
+}
+
+/// Register a native C function in the legacy process-global registry.
+///
+/// This legacy entry point applies to standalone VMs using the global
+/// registry; C embedding runtimes now use isolated per-runtime registries.
+/// Use `nulang_runtime_register_native_function` for embedded callbacks.
+///
+///
 ///
 /// The function pointer must match the supplied parameter and return types.
 /// Use `"__nulang_registered__"` as the sentinel library name in the Nulang
