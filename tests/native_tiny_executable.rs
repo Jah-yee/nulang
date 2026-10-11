@@ -189,3 +189,27 @@ fn explicit_output_symlink_to_source_is_rejected() {
     assert!(alias.symlink_metadata().unwrap().file_type().is_symlink());
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn standalone_print_matches_bytecode_output() {
+    let dir = test_dir();
+    let source = "perform IO.print(\"bytecode/native parity\")";
+    let built = build(&dir, source);
+    assert!(
+        built.status.success(),
+        "compiler stderr: {}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let bytecode = Command::new(env!("CARGO_BIN_EXE_nulang"))
+        .arg(dir.join("main.nula"))
+        .output()
+        .expect("run bytecode reference");
+    let native = Command::new(dir.join("hello"))
+        .output()
+        .expect("run linked executable");
+    assert!(bytecode.status.success());
+    assert!(native.status.success());
+    assert_eq!(native.stdout, bytecode.stdout, "bytecode/native stdout mismatch");
+    assert_eq!(native.stderr, bytecode.stderr, "bytecode/native stderr mismatch");
+    fs::remove_dir_all(dir).unwrap();
+}
