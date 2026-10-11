@@ -256,12 +256,11 @@ fn effect_row_compatible(e1: &EffectRow, e2: &EffectRow) -> bool {
         }
         (EffectRow::Open(a, _), EffectRow::Closed(b))
         | (EffectRow::Closed(b), EffectRow::Open(a, _)) => b.iter().all(|e| a.contains(e)),
-        (EffectRow::Open(a, _), EffectRow::Open(b, _)) => {
-            // Both sides must agree on fixed effects; row variables are
-            // assumed compatible (full row unification requires Region
-            // to participate in the Type::Var substitution machinery,
-            // which is a larger refactor — see REVIEW plan Phase 1 item 3).
-            a.iter().all(|e| b.contains(e)) && b.iter().all(|e| a.contains(e))
+        (EffectRow::Open(a, r1), EffectRow::Open(b, r2)) => {
+            // Matching explicit effects are not enough: unrelated tails
+            // cannot be equated without carrying a row substitution. Until
+            // that solver exists, only a shared tail is provably compatible.
+            r1 == r2 && a.iter().all(|e| b.contains(e)) && b.iter().all(|e| a.contains(e))
         }
     }
 }
@@ -399,6 +398,29 @@ fn mgu_assignable(found: &Type, expected: &Type, span: Span) -> NuResult<Substit
         (found.actor_ref_protocol(), expected.actor_ref_protocol())
     {
         return unify_actor_ref_attenuation(advertised, required, span);
+    }
+    // Unlike symmetric HM unification, assignment of a function value to an
+    // expected callback contract is directional: actual effects must fit
+    // inside the allowance. In particular, an unknown open tail cannot
+    // satisfy a closed pure contract.
+    if let (
+        Type::Function {
+            effect: found_effect,
+            ..
+        },
+        Type::Function {
+            effect: expected_effect,
+            ..
+        },
+    ) = (found, expected)
+    {
+        if !crate::effect_checker::effect_row_subset(found_effect, expected_effect) {
+            return Err(NuError::type_mismatch(
+                format!("function with effects {}", expected_effect),
+                format!("function with effects {}", found_effect),
+                span,
+            ));
+        }
     }
     mgu(found, expected, span)
 }
@@ -2403,8 +2425,10 @@ impl TypeChecker {
             };
             if expected_params.len() == arg_types.len() {
                 for (found, expected) in arg_types.iter_mut().zip(expected_params) {
-                    if found.actor_ref_protocol().is_some()
-                        && expected.actor_ref_protocol().is_some()
+                    if (found.actor_ref_protocol().is_some()
+                        && expected.actor_ref_protocol().is_some())
+                        || (matches!(found, Type::Function { .. })
+                            && matches!(expected, Type::Function { .. }))
                     {
                         let s_att = mgu_assignable(
                             &apply_subst(found, &subst),
