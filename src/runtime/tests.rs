@@ -230,9 +230,9 @@ fn embedded_pump_idle_returns_without_executing_callback() {
     // an idle callback or enter run_scheduler's timer/IO wait loop.
     let idle_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let called = idle_called.clone();
-    rt.set_idle_callback(move || {
+    rt.idle_callback = Some(Box::new(move || {
         called.store(true, std::sync::atomic::Ordering::SeqCst);
-    });
+    }));
 
     assert_eq!(rt.pump_ready(4), 0);
     assert!(!idle_called.load(std::sync::atomic::Ordering::SeqCst));
