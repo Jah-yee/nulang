@@ -5394,7 +5394,16 @@ mod tests {
             args: vec![var("first"), var(second)],
             span: sp(),
         };
-        assert!(tc.infer_expr(&ctx, &run("conflicting")).is_err());
+        let (_, combined) = tc.infer_expr(&ctx, &run("conflicting")).unwrap();
+        match combined {
+            Type::Function { effect, .. } => {
+                assert_eq!(
+                    effect,
+                    EffectRow::Closed(vec![Effect::FS, Effect::Net])
+                );
+            }
+            ty => panic!("expected function result, got {ty:?}"),
+        }
         let (_, result) = tc.infer_expr(&ctx, &run("compatible")).unwrap();
         match result {
             Type::Function { effect, .. } => {
@@ -5402,6 +5411,46 @@ mod tests {
             }
             ty => panic!("expected function result, got {ty:?}"),
         }
+    }
+
+    #[test]
+    fn test_independent_unknown_callback_tails_are_not_equated() {
+        let tail = Region::fresh();
+        let first_tail = Region::fresh();
+        let second_tail = Region::fresh();
+        let consumer = Type::Function {
+            param: Box::new(Type::Tuple(vec![
+                effect_callback(EffectRow::Open(vec![Effect::IO], tail)),
+                effect_callback(EffectRow::Open(vec![Effect::FS], tail)),
+            ])),
+            ret: Box::new(Type::unit()),
+            effect: EffectRow::empty(),
+            cap: Capability::Ref,
+        };
+        let mut ctx = TypeContext::new();
+        ctx.bind("consume".to_string(), consumer, Capability::Ref, false);
+        ctx.bind(
+            "first".to_string(),
+            effect_callback(EffectRow::Open(vec![Effect::Net], first_tail)),
+            Capability::Ref,
+            false,
+        );
+        ctx.bind(
+            "second".to_string(),
+            effect_callback(EffectRow::Open(vec![Effect::Net], second_tail)),
+            Capability::Ref,
+            false,
+        );
+        let call = Expr::App {
+            func: Box::new(var("consume")),
+            args: vec![var("first"), var("second")],
+            span: sp(),
+        };
+        let mut tc = TypeChecker::new();
+        assert!(
+            tc.infer_expr(&ctx, &call).is_err(),
+            "independent unknown tails cannot be silently combined or closed"
+        );
     }
 
     #[test]
