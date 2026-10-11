@@ -5035,10 +5035,7 @@ mod tests {
             effect,
             cap: Capability::Ref,
         };
-        let expected = Type::Record(vec![(
-            "callback".to_string(),
-            callback(EffectRow::empty()),
-        )]);
+        let expected = Type::Record(vec![("callback".to_string(), callback(EffectRow::empty()))]);
         let actual = Type::Record(vec![(
             "callback".to_string(),
             callback(EffectRow::singleton(Effect::FS)),
