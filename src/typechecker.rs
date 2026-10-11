@@ -5517,6 +5517,41 @@ mod tests {
     }
 
     #[test]
+    fn test_nested_record_callback_rows_stay_conservative_without_recursive_solver() {
+        // Call-scoped row specialization currently operates on direct
+        // callback parameters, not callback functions nested in records.
+        // Reject rather than silently equate an unresolved expected tail
+        // with a different closed effect set.
+        let expected_tail = Region::fresh();
+        let consumer = Type::Function {
+            param: Box::new(Type::Record(vec![(
+                "cb".to_string(),
+                effect_callback(EffectRow::Open(vec![Effect::IO], expected_tail)),
+            )])),
+            ret: Box::new(Type::unit()),
+            effect: EffectRow::empty(),
+            cap: Capability::Ref,
+        };
+        let nested_arg = Type::Record(vec![(
+            "cb".to_string(),
+            effect_callback(EffectRow::Closed(vec![Effect::IO, Effect::FS])),
+        )]);
+        let mut ctx = TypeContext::new();
+        ctx.bind("consume".to_string(), consumer, Capability::Ref, false);
+        ctx.bind("record".to_string(), nested_arg, Capability::Ref, false);
+        let call = Expr::App {
+            func: Box::new(var("consume")),
+            args: vec![var("record")],
+            span: sp(),
+        };
+        let mut tc = TypeChecker::new();
+        assert!(
+            tc.infer_expr(&ctx, &call).is_err(),
+            "nested callback effects require recursive, scoped row constraints"
+        );
+    }
+
+    #[test]
     fn test_call_row_specialization_is_transaction_local() {
         let tail = Region::fresh();
         let mut ctx = TypeContext::new();
