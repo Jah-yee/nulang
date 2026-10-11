@@ -24,8 +24,13 @@ git push origin v0.2.0
 
 The `Release` workflow first verifies that the pushed tag matches both
 `Cargo.toml` and the CLI `VERSION`, then builds four targets in parallel
-(`linux-x86_64`, `linux-aarch64`, `macos-aarch64`, `windows-x86_64`), runs
-`cargo test --locked --release` on the native Linux build, then the `publish` job
+(`linux-x86_64`, `linux-aarch64`, `macos-aarch64`, `windows-x86_64`), using
+`--no-default-features --features release-cli`. This distribution includes
+the standard non-Python CLI functionality (native compiler/runtime, LSP,
+SQLite-backed storage, network/TLS/AI runtime and FFI) but **not Python
+interop**, so its Linux ELF does not require the build runner's exact Python
+shared-library ABI. Native Linux CI runs the CLI smoke test and native release
+tests with the same profile. The `publish` job
 creates a GitHub Release with:
 
 - one `nulang-<platform>-<arch>.tar.gz` archive per supported target; the
@@ -33,9 +38,19 @@ creates a GitHub Release with:
 - a `.sha256` checksum per tarball
 - auto-generated release notes
 
-> Note: the `linux-aarch64` artifact is cross-compiled with the default
-> feature set. The workflow installs the arm64 Python development library and
-> pins PyO3's cross-Python version for that target.
+> Compatibility profile: `Cargo.toml` retains `full` as the source-build
+> default, including Python interoperability. Developers who need Python
+> integration can explicitly build it with:
+>
+> ```bash
+> cargo build --locked --release --no-default-features --features full
+> ```
+>
+> That build may require a compatible system Python development library.
+> The prebuilt `release-cli` profile does not include Python interoperability.
+> The Linux aarch64 archive is cross-compiled without PyO3. Do **not** claim
+> that a cross-compiled binary has passed a native arm64 smoke test unless
+> such a check actually ran.
 
 ## 4. Verify the release
 
@@ -51,5 +66,15 @@ creates a GitHub Release with:
   ./nulang --eval 'perform IO.print("release works")'
   ```
 
-- If anything is wrong, delete the release and tag (`git push origin :v0.2.0`
-  plus the GitHub release page), fix, and re-tag.
+- On Linux, verify dynamic dependencies and run the same smoke guard used by CI:
+  ```bash
+  bash scripts/check_release_linux.sh ./nulang
+  ```
+  This rejects `libpython*.so` ELF dependencies and missing shared libraries.
+  It does not certify portability to every Linux distribution or CPU.
+- Verify the extracted executables on clean supported Linux, macOS and Windows
+  machines, **not only on their build runners**. In particular, require a
+  Python-3.13-only or Python-absent Linux environment so the old Python-3.12
+  linkage defect cannot be hidden by CI-installed libraries.
+- If anything is wrong, stop publication or follow the documented release/tag
+  correction process. Do not silently replace a published checksum or archive.
