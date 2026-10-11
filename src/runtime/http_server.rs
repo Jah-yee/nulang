@@ -563,10 +563,10 @@ pub fn kv_all() -> Vec<(String, String)> {
 const MAX_REALTIME_ROOMS: usize = 128;
 const MAX_REALTIME_ROOM_NAME_BYTES: usize = 128;
 const MAX_REALTIME_HISTORY_MESSAGES: usize = 64;
-const MAX_REALTIME_HISTORY_BYTES: usize = 256 * 1024;
-const MAX_REALTIME_MESSAGE_BYTES: usize = 16 * 1024;
-const MAX_REALTIME_SUBSCRIBERS_PER_ROOM: usize = 32;
-const MAX_REALTIME_SUBSCRIBER_BACKLOG: usize = 16;
+const MAX_REALTIME_HISTORY_BYTES: usize = 64 * 1024;
+const MAX_REALTIME_MESSAGE_BYTES: usize = 8 * 1024;
+const MAX_REALTIME_SUBSCRIBERS_PER_ROOM: usize = 8;
+const MAX_REALTIME_SUBSCRIBER_BACKLOG: usize = 8;
 
 static REALTIME_BROADCAST: OnceLock<Mutex<RealtimeRegistry>> = OnceLock::new();
 
@@ -1149,6 +1149,8 @@ impl WebDevServer {
                 return;
             }
         };
+        // A stalled TCP reader must not hold an SSE thread indefinitely.
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
         let mut out = Vec::new();
         out.extend_from_slice(b"HTTP/1.1 200 OK\r\n");
         out.extend_from_slice(b"Content-Type: text/event-stream\r\n");
@@ -1426,6 +1428,32 @@ mod tests {
             Some(format!("event-{}", MAX_REALTIME_HISTORY_MESSAGES + MAX_REALTIME_SUBSCRIBER_BACKLOG + 3).as_str())
         );
         assert!(registry.broadcast("unit:bounded", &"x".repeat(MAX_REALTIME_MESSAGE_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn realtime_history_is_bounded_by_bytes_as_well_as_event_count() {
+        let mut registry = RealtimeRegistry::default();
+        for n in 0..32 {
+            registry
+                .broadcast("unit:bytes", &format!("{n:02}{}", "x".repeat(MAX_REALTIME_MESSAGE_BYTES - 2)))
+                .unwrap();
+        }
+        let room = registry.rooms.get("unit:bytes").unwrap();
+        assert!(room.replay_bytes <= MAX_REALTIME_HISTORY_BYTES);
+        assert!(room.messages.len() <= MAX_REALTIME_HISTORY_BYTES / MAX_REALTIME_MESSAGE_BYTES);
+    }
+
+    #[test]
+    fn realtime_registry_preserves_active_rooms_at_capacity() {
+        let mut registry = RealtimeRegistry::default();
+        let mut active = Vec::new();
+        for n in 0..MAX_REALTIME_ROOMS {
+            let (_, _, receiver) = registry.subscribe(&format!("active:{n}")).unwrap();
+            active.push(receiver);
+        }
+        assert_eq!(registry.rooms.len(), MAX_REALTIME_ROOMS);
+        assert_eq!(registry.broadcast("active:new", "message"), Err(RealtimeLimitError::RoomCapacity));
+        assert_eq!(registry.rooms.len(), MAX_REALTIME_ROOMS);
     }
 
     #[test]
