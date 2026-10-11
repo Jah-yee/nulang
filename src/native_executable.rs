@@ -202,35 +202,36 @@ fn compile_object(mir: &mir::Module) -> NuResult<Vec<u8>> {
 #[cfg(target_os = "linux")]
 pub fn emit_executable(mir: &mir::Module, output: &Path) -> NuResult<()> {
     let bytes = compile_object(mir)?;
-    let pid = std::process::id();
-    let object_path = output.with_extension(format!("nulang-{pid}.o"));
-    let temporary_exe = output.with_extension(format!("nulang-{pid}.tmp"));
+    let parent = output.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    // A private, exclusive directory avoids predictable .o/.tmp names and
+    // symlink-following writes in attacker-controlled directories.
+    let staging = tempfile::Builder::new().prefix(".nulang-link-")
+        .tempdir_in(parent)
+        .map_err(|e| error(format!("create staging directory: {e}")))?;
+    let object_path = staging.path().join("main.o");
+    let temporary_exe = staging.path().join("main");
     std::fs::write(&object_path, bytes)
         .map_err(|e| error(format!("write object: {e}")))?;
 
-    let link = Command::new("cc")
+    let result = Command::new("cc")
         .arg(&object_path)
         .arg("-Wl,--gc-sections")
         .arg("-s")
         .arg("-o")
         .arg(&temporary_exe)
-        .output();
-    let _ = std::fs::remove_file(&object_path);
-    match link {
-        Ok(result) if result.status.success() => {}
-        Ok(result) => {
-            let _ = std::fs::remove_file(&temporary_exe);
-            return Err(error(format!("host linker failed: {}", String::from_utf8_lossy(&result.stderr))));
-        }
-        Err(e) => {
-            let _ = std::fs::remove_file(&temporary_exe);
-            return Err(error(format!("invoke cc: {e}")));
-        }
+        .output()
+        .map_err(|e| error(format!("invoke cc: {e}")))?;
+    if !result.status.success() {
+        return Err(error(format!(
+            "host linker failed: {}", String::from_utf8_lossy(&result.stderr)
+        )));
     }
-    std::fs::rename(&temporary_exe, output).map_err(|e| {
-        let _ = std::fs::remove_file(&temporary_exe);
-        error(format!("install executable: {e}"))
-    })
+    // Same-directory rename installs only a fully linked artifact. TempDir
+    // removes both the object and failed linker outputs on every exit path.
+    std::fs::rename(&temporary_exe, output)
+        .map_err(|e| error(format!("install executable: {e}")))
 }
 
 #[cfg(not(target_os = "linux"))]
