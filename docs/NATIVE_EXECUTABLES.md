@@ -49,6 +49,23 @@ cargo check --locked --no-default-features
 bash scripts/check_mobile_runtime_profile.sh
 ```
 
+For a repeatable Linux size and stdout-parity report:
+
+```sh
+cargo build --locked --release --no-default-features --features native-executable --bin nulang
+bash scripts/measure_native_binaries.sh ./target/release/nulang ./target/native-size-report
+cat ./target/native-size-report/report.tsv
+```
+
+The script always compares Nulang against C, and adds Go, TinyGo, and Rust
+baselines only when the corresponding compiler is available. It fails if
+binary output differs from the same expected stdout fixture. Artifacts and
+the tab-separated report are retained in a fresh output directory. All
+executables use size-directed build settings and symbol stripping where
+supported; compiler versions, runtime/linker defaults, and library dependencies
+still differ. This is a smoke/measurement harness, not a statistically
+controlled performance study.
+
 Compare **identical programs and linking requirements**, not a
 dynamically linked Nulang hello-world against a fully static Go binary.
 Measure bytes on disk (uncompressed and stripped), executable dependencies
