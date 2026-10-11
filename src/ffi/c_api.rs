@@ -946,6 +946,102 @@ mod tests {
     }
 
     #[test]
+    fn test_owned_handles_capture_distinct_module_strings_and_survive_new_compilation() {
+        let rt = nulang_runtime_new();
+        let a = CString::new("1").unwrap();
+        let b = CString::new("2").unwrap();
+        let first = unsafe { nulang_compile(rt, a.as_ptr()) };
+        let second = unsafe { nulang_compile(rt, b.as_ptr()) };
+        assert!(first >= 0 && second >= 0);
+
+        let a = CString::new("first owner").unwrap();
+        let b = CString::new("second owner").unwrap();
+        let first_raw = unsafe { nulang_module_string(rt, first, a.as_ptr()) };
+        let second_raw = unsafe { nulang_module_string(rt, second, b.as_ptr()) };
+        assert_eq!(first_raw.raw, second_raw.raw);
+
+        let first_owned = unsafe { nulang_owned_value_from_module(rt, first, first_raw) };
+        let second_owned = unsafe { nulang_owned_value_from_module(rt, second, second_raw) };
+        assert!(first_owned != 0 && second_owned != 0 && first_owned != second_owned);
+        let more = CString::new("3").unwrap();
+        assert!(unsafe { nulang_compile(rt, more.as_ptr()) } >= 0);
+
+        let first_ptr = unsafe { nulang_owned_value_to_string(rt, first_owned) };
+        let second_ptr = unsafe { nulang_owned_value_to_string(rt, second_owned) };
+        assert!(!first_ptr.is_null() && !second_ptr.is_null());
+        assert_eq!(unsafe { CStr::from_ptr(first_ptr) }.to_str().unwrap(), "first owner");
+        assert_eq!(unsafe { CStr::from_ptr(second_ptr) }.to_str().unwrap(), "second owner");
+        assert!(unsafe { nulang_owned_value_release(rt, first_owned) });
+        assert!(unsafe { nulang_owned_value_release(rt, second_owned) });
+        unsafe { nulang_runtime_free(rt) };
+    }
+
+    #[test]
+    fn test_owned_handles_are_instance_scoped_and_cannot_be_reused_after_release() {
+        let first = nulang_runtime_new();
+        let second = nulang_runtime_new();
+        let value = unsafe { nulang_owned_value_int_new(first, 57) };
+        assert_ne!(value, 0);
+        let mut out = 0i64;
+        assert!(!unsafe { nulang_owned_value_int(second, value, &mut out) });
+        assert!(!unsafe { nulang_owned_value_release(second, value) });
+        assert!(unsafe { nulang_owned_value_int(first, value, &mut out) });
+        assert_eq!(out, 57);
+        assert!(unsafe { nulang_owned_value_release(first, value) });
+        assert!(!unsafe { nulang_owned_value_int(first, value, &mut out) });
+        assert!(!unsafe { nulang_owned_value_release(first, value) });
+        unsafe {
+            nulang_runtime_free(first);
+            nulang_runtime_free(second);
+        }
+    }
+
+    #[test]
+    fn test_owned_handles_run_and_call_functions_with_string_inputs() {
+        let rt = nulang_runtime_new();
+        let source = CString::new(
+            "fn greet(name: String) -> String { perform String.concat(\"hello \", name) } greet(\"world\")",
+        )
+        .unwrap();
+        let module = unsafe { nulang_compile(rt, source.as_ptr()) };
+        assert!(module >= 0);
+        let first = unsafe { nulang_run_owned(rt, module) };
+        assert_ne!(first, 0);
+        let first_str = unsafe { nulang_owned_value_to_string(rt, first) };
+        assert_eq!(unsafe { CStr::from_ptr(first_str) }.to_str().unwrap(), "hello world");
+
+        let name = CString::new("Nulang").unwrap();
+        let input = unsafe { nulang_owned_value_string_new(rt, name.as_ptr()) };
+        assert_ne!(input, 0);
+        let function = CString::new("greet").unwrap();
+        let result = unsafe {
+            nulang_call_function_owned(rt, module, function.as_ptr(), &input, 1)
+        };
+        assert_ne!(result, 0);
+        let s = unsafe { nulang_owned_value_to_string(rt, result) };
+        assert!(!s.is_null());
+        assert_eq!(unsafe { CStr::from_ptr(s) }.to_str().unwrap(), "hello Nulang");
+
+        assert!(unsafe { nulang_owned_value_release(rt, input) });
+        assert!(unsafe { nulang_owned_value_release(rt, first) });
+        assert!(unsafe { nulang_owned_value_release(rt, result) });
+        unsafe { nulang_runtime_free(rt) };
+    }
+
+    #[test]
+    fn test_owned_handle_rejects_pointer_forgery_and_invalid_module() {
+        let rt = nulang_runtime_new();
+        let source = CString::new("1").unwrap();
+        let module = unsafe { nulang_compile(rt, source.as_ptr()) };
+        assert!(module >= 0);
+        let forged = NulangValue { raw: TAG_PTR | 0x1234 };
+        assert_eq!(unsafe { nulang_owned_value_from_module(rt, module, forged) }, 0);
+        assert_eq!(unsafe { nulang_owned_value_from_module(rt, -1, nulang_value_int_new(7)) }, 0);
+        assert!(!unsafe { nulang_last_error(rt) }.is_null());
+        unsafe { nulang_runtime_free(rt) };
+    }
+
+    #[test]
     fn test_c_api_compile_and_run() {
         let rt = nulang_runtime_new();
         assert!(!rt.is_null());
