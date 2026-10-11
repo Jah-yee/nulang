@@ -184,6 +184,61 @@ fn run_ready_actor_turn(rt: &mut Runtime, actor_id: u64) {
 }
 
 #[test]
+fn embedded_pump_is_bounded_and_preserves_pending_mailbox_work() {
+    let mut rt = Runtime::new();
+    let actor_id = rt.spawn_actor(Box::new(|| vec![("count".to_string(), Value::int(0))]));
+    rt.actors.get_mut(&actor_id).unwrap().register_behavior("inc", |actor, _args| {
+        let count = actor.get_state_field("count").and_then(|v| v.as_int()).unwrap();
+        actor.set_state_field("count", Value::int(count + 1));
+    });
+    for _ in 0..5 {
+        rt.send_message(actor_id, "inc", &[]);
+    }
+
+    assert_eq!(rt.pump_ready(2), 2, "must never exceed the caller's turn budget");
+    assert_eq!(rt.actors[&actor_id].mailbox.len(), 3);
+    assert_eq!(
+        rt.actors[&actor_id].get_state_field("count").and_then(|v| v.as_int()),
+        Some(2)
+    );
+
+    assert_eq!(rt.pump_ready(10), 3);
+    assert_eq!(rt.actors[&actor_id].mailbox.len(), 0);
+    assert_eq!(
+        rt.actors[&actor_id].get_state_field("count").and_then(|v| v.as_int()),
+        Some(5)
+    );
+}
+
+#[test]
+fn embedded_pump_zero_budget_does_not_execute_messages() {
+    let mut rt = Runtime::new();
+    let actor_id = rt.spawn_actor(Box::new(Vec::new));
+    declare_test_behavior(&mut rt, actor_id, "tick");
+    rt.send_message(actor_id, "tick", &[]);
+
+    assert_eq!(rt.pump_ready(0), 0);
+    assert_eq!(rt.actors[&actor_id].mailbox.len(), 1);
+    assert_eq!(rt.pump_ready(1), 1);
+    assert_eq!(rt.actors[&actor_id].mailbox.len(), 0);
+}
+
+#[test]
+fn embedded_pump_idle_returns_without_executing_callback() {
+    let mut rt = Runtime::new();
+    // The embedding host controls when to poll. The API must not run
+    // an idle callback or enter run_scheduler's timer/IO wait loop.
+    let idle_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let called = idle_called.clone();
+    rt.set_idle_callback(move || {
+        called.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+
+    assert_eq!(rt.pump_ready(4), 0);
+    assert!(!idle_called.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[test]
 fn test_spawn_send_step_sequence() {
     let mut rt = Runtime::new();
     let actor_id = rt.spawn_actor(Box::new(|| vec![("count".to_string(), Value::int(0))]));
