@@ -76,9 +76,9 @@ impl NulangRuntime {
     }
 
     pub(crate) fn store_owned(&mut self, value: OwnedHostValue) -> u64 {
-        match NEXT_OWNED_HANDLE.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| {
-            id.checked_add(1)
-        }) {
+        match NEXT_OWNED_HANDLE
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        {
             Ok(id) => {
                 self.owned_values.insert(id, value);
                 id
@@ -829,10 +829,7 @@ pub unsafe extern "C" fn nulang_owned_value_from_module(
 /// # Safety
 /// `runtime` must be a valid, exclusively accessed runtime pointer.
 #[no_mangle]
-pub unsafe extern "C" fn nulang_run_owned(
-    runtime: *mut NulangRuntime,
-    module_handle: i64,
-) -> u64 {
+pub unsafe extern "C" fn nulang_run_owned(runtime: *mut NulangRuntime, module_handle: i64) -> u64 {
     if runtime.is_null() || module_handle < 0 {
         return 0;
     }
@@ -848,7 +845,10 @@ pub unsafe extern "C" fn nulang_run_owned(
 /// # Safety
 /// `runtime` must be valid and exclusively accessed.
 #[no_mangle]
-pub unsafe extern "C" fn nulang_owned_value_int_new(runtime: *mut NulangRuntime, value: i64) -> u64 {
+pub unsafe extern "C" fn nulang_owned_value_int_new(
+    runtime: *mut NulangRuntime,
+    value: i64,
+) -> u64 {
     if runtime.is_null() {
         return 0;
     }
@@ -1297,8 +1297,14 @@ mod tests {
         let first_ptr = unsafe { nulang_owned_value_to_string(rt, first_owned) };
         let second_ptr = unsafe { nulang_owned_value_to_string(rt, second_owned) };
         assert!(!first_ptr.is_null() && !second_ptr.is_null());
-        assert_eq!(unsafe { CStr::from_ptr(first_ptr) }.to_str().unwrap(), "first owner");
-        assert_eq!(unsafe { CStr::from_ptr(second_ptr) }.to_str().unwrap(), "second owner");
+        assert_eq!(
+            unsafe { CStr::from_ptr(first_ptr) }.to_str().unwrap(),
+            "first owner"
+        );
+        assert_eq!(
+            unsafe { CStr::from_ptr(second_ptr) }.to_str().unwrap(),
+            "second owner"
+        );
         assert!(unsafe { nulang_owned_value_release(rt, first_owned) });
         assert!(unsafe { nulang_owned_value_release(rt, second_owned) });
         unsafe { nulang_runtime_free(rt) };
@@ -1336,19 +1342,24 @@ mod tests {
         let first = unsafe { nulang_run_owned(rt, module) };
         assert_ne!(first, 0);
         let first_str = unsafe { nulang_owned_value_to_string(rt, first) };
-        assert_eq!(unsafe { CStr::from_ptr(first_str) }.to_str().unwrap(), "hello world");
+        assert_eq!(
+            unsafe { CStr::from_ptr(first_str) }.to_str().unwrap(),
+            "hello world"
+        );
 
         let name = CString::new("Nulang").unwrap();
         let input = unsafe { nulang_owned_value_string_new(rt, name.as_ptr()) };
         assert_ne!(input, 0);
         let function = CString::new("greet").unwrap();
-        let result = unsafe {
-            nulang_call_function_owned(rt, module, function.as_ptr(), &input, 1)
-        };
+        let result =
+            unsafe { nulang_call_function_owned(rt, module, function.as_ptr(), &input, 1) };
         assert_ne!(result, 0);
         let s = unsafe { nulang_owned_value_to_string(rt, result) };
         assert!(!s.is_null());
-        assert_eq!(unsafe { CStr::from_ptr(s) }.to_str().unwrap(), "hello Nulang");
+        assert_eq!(
+            unsafe { CStr::from_ptr(s) }.to_str().unwrap(),
+            "hello Nulang"
+        );
 
         assert!(unsafe { nulang_owned_value_release(rt, input) });
         assert!(unsafe { nulang_owned_value_release(rt, first) });
@@ -1376,9 +1387,17 @@ mod tests {
         let source = CString::new("1").unwrap();
         let module = unsafe { nulang_compile(rt, source.as_ptr()) };
         assert!(module >= 0);
-        let forged = NulangValue { raw: TAG_PTR | 0x1234 };
-        assert_eq!(unsafe { nulang_owned_value_from_module(rt, module, forged) }, 0);
-        assert_eq!(unsafe { nulang_owned_value_from_module(rt, -1, nulang_value_int_new(7)) }, 0);
+        let forged = NulangValue {
+            raw: TAG_PTR | 0x1234,
+        };
+        assert_eq!(
+            unsafe { nulang_owned_value_from_module(rt, module, forged) },
+            0
+        );
+        assert_eq!(
+            unsafe { nulang_owned_value_from_module(rt, -1, nulang_value_int_new(7)) },
+            0
+        );
         assert!(!unsafe { nulang_last_error(rt) }.is_null());
         unsafe { nulang_runtime_free(rt) };
     }
