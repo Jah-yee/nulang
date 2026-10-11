@@ -90,6 +90,12 @@ def compile_bench(root: pathlib.Path, target: pathlib.Path) -> pathlib.Path:
     return pathlib.Path(next(iter(binaries)))
 
 
+def criterion_estimate_path(home: pathlib.Path, case: str) -> pathlib.Path:
+    # Criterion's BenchmarkId::make_filename_safe replaces '/' in a group
+    # with '_'. The function ID is then placed in its own subdirectory.
+    return home / "actor_iso_arena" / case / "new" / "estimates.json"
+
+
 def criterion_case(binary: pathlib.Path, target: pathlib.Path, case: str,
                    cpu: int | None, warmup_seconds: float,
                    measurement_seconds: float) -> float:
@@ -104,7 +110,7 @@ def criterion_case(binary: pathlib.Path, target: pathlib.Path, case: str,
     # fallback cannot place both variants' measurements in the checkout.
     criterion_home = target / "criterion"
     criterion_home.mkdir(parents=True, exist_ok=True)
-    estimate = criterion_home / "actor" / "iso_arena" / case / "new" / "estimates.json"
+    estimate = criterion_estimate_path(criterion_home, case)
     # Prevent a no-op/filter mismatch from silently reusing a prior sample.
     estimate.unlink(missing_ok=True)
     output = run(
