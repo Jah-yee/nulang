@@ -2574,6 +2574,11 @@ impl TypeChecker {
         } else {
             Type::Tuple(arg_types)
         };
+        // Apply the same proven tail equations on both sides of the final
+        // symmetric unification; returning a solved type alone is too late.
+        let param_ty = row_solver
+            .apply_to_type(&param_ty)
+            .map_err(|e| NuError::type_error(format!("effect-row constraint: {e}"), span))?;
 
         // Preserve the function's effect row instead of forcing it to empty.
         // If the function type is not yet known, use a fresh open row so that
