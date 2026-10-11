@@ -5132,6 +5132,195 @@ mod tests {
         );
     }
 
+    // Scoped row specialization at an application boundary must not leak
+    // beyond the call or erase structural callback type constraints.
+    fn effect_callback(effects: EffectRow) -> Type {
+        Type::Function {
+            param: Box::new(Type::unit()),
+            ret: Box::new(Type::unit()),
+            effect: effects,
+            cap: Capability::Ref,
+        }
+    }
+
+    fn row_callback_consumer(tail: Region) -> Type {
+        Type::Function {
+            param: Box::new(effect_callback(EffectRow::Open(vec![Effect::IO], tail))),
+            ret: Box::new(effect_callback(EffectRow::Open(vec![], tail))),
+            effect: EffectRow::empty(),
+            cap: Capability::Ref,
+        }
+    }
+
+    fn invoke_callback(consumer: &str, cb: &str) -> Expr {
+        Expr::App {
+            func: Box::new(var(consumer)),
+            args: vec![var(cb)],
+            span: sp(),
+        }
+    }
+
+    #[test]
+    fn test_call_specializes_open_callback_row_in_return_type() {
+        let tail = Region::fresh();
+        let mut ctx = TypeContext::new();
+        ctx.bind(
+            "consume".to_string(),
+            row_callback_consumer(tail),
+            Capability::Ref,
+            false,
+        );
+        ctx.bind(
+            "io_fs".to_string(),
+            effect_callback(EffectRow::Closed(vec![Effect::IO, Effect::FS])),
+            Capability::Ref,
+            false,
+        );
+        let mut tc = TypeChecker::new();
+        let (s, inferred) = tc.infer_expr(&ctx, &invoke_callback("consume", "io_fs")).unwrap();
+        match apply_subst(&inferred, &s) {
+            Type::Function { effect, .. } => {
+                assert_eq!(effect, EffectRow::Closed(vec![Effect::FS]));
+            }
+            ty => panic!("expected function result, got {ty:?}"),
+        }
+    }
+
+    #[test]
+    fn test_two_callback_arguments_share_constraints_within_one_call() {
+        let tail = Region::fresh();
+        let consumer = Type::Function {
+            param: Box::new(Type::Tuple(vec![
+                effect_callback(EffectRow::Open(vec![Effect::IO], tail)),
+                effect_callback(EffectRow::Open(vec![Effect::FS], tail)),
+            ])),
+            ret: Box::new(effect_callback(EffectRow::Open(vec![], tail))),
+            effect: EffectRow::empty(),
+            cap: Capability::Ref,
+        };
+        let mut ctx = TypeContext::new();
+        ctx.bind("consume".to_string(), consumer, Capability::Ref, false);
+        ctx.bind(
+            "first".to_string(),
+            effect_callback(EffectRow::Closed(vec![Effect::IO, Effect::FS])),
+            Capability::Ref,
+            false,
+        );
+        ctx.bind(
+            "conflicting".to_string(),
+            effect_callback(EffectRow::Closed(vec![Effect::FS, Effect::Net])),
+            Capability::Ref,
+            false,
+        );
+        ctx.bind(
+            "compatible".to_string(),
+            effect_callback(EffectRow::singleton(Effect::FS)),
+            Capability::Ref,
+            false,
+        );
+        let mut tc = TypeChecker::new();
+        let run = |second| Expr::App {
+            func: Box::new(var("consume")),
+            args: vec![var("first"), var(second)],
+            span: sp(),
+        };
+        assert!(tc.infer_expr(&ctx, &run("conflicting")).is_err());
+        let (_, result) = tc.infer_expr(&ctx, &run("compatible")).unwrap();
+        match result {
+            Type::Function { effect, .. } => {
+                assert_eq!(effect, EffectRow::Closed(vec![Effect::FS]));
+            }
+            ty => panic!("expected function result, got {ty:?}"),
+        }
+    }
+
+    #[test]
+    fn test_call_row_specialization_is_transaction_local() {
+        let tail = Region::fresh();
+        let mut ctx = TypeContext::new();
+        ctx.bind(
+            "consume".to_string(),
+            row_callback_consumer(tail),
+            Capability::Ref,
+            false,
+        );
+        for (name, extra) in [("io_fs", Effect::FS), ("io_net", Effect::Net)] {
+            ctx.bind(
+                name.to_string(),
+                effect_callback(EffectRow::Closed(vec![Effect::IO, extra])),
+                Capability::Ref,
+                false,
+            );
+        }
+        let mut tc = TypeChecker::new();
+        for (name, expected_effect) in [("io_fs", Effect::FS), ("io_net", Effect::Net)] {
+            let (_, result) = tc.infer_expr(&ctx, &invoke_callback("consume", name)).unwrap();
+            match result {
+                Type::Function { effect, .. } => {
+                    assert_eq!(effect, EffectRow::singleton(expected_effect));
+                }
+                ty => panic!("expected function result, got {ty:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_callback_row_specialization_preserves_return_type_mismatch() {
+        let mut ctx = TypeContext::new();
+        ctx.bind(
+            "consume".to_string(),
+            row_callback_consumer(Region::fresh()),
+            Capability::Ref,
+            false,
+        );
+        ctx.bind(
+            "wrong_return".to_string(),
+            Type::Function {
+                param: Box::new(Type::unit()),
+                ret: Box::new(Type::int()),
+                effect: EffectRow::Closed(vec![Effect::IO, Effect::FS]),
+                cap: Capability::Ref,
+            },
+            Capability::Ref,
+            false,
+        );
+        let mut tc = TypeChecker::new();
+        assert!(
+            tc.infer_expr(&ctx, &invoke_callback("consume", "wrong_return"))
+                .is_err(),
+            "row specialization must not erase the callback's return type"
+        );
+    }
+
+    #[test]
+    fn test_unknown_open_callback_cannot_specialize_to_closed_purity() {
+        let tail = Region::fresh();
+        let mut ctx = TypeContext::new();
+        ctx.bind(
+            "pure_consumer".to_string(),
+            Type::Function {
+                param: Box::new(effect_callback(EffectRow::empty())),
+                ret: Box::new(Type::unit()),
+                effect: EffectRow::empty(),
+                cap: Capability::Ref,
+            },
+            Capability::Ref,
+            false,
+        );
+        ctx.bind(
+            "unknown".to_string(),
+            effect_callback(EffectRow::Open(vec![Effect::IO], tail)),
+            Capability::Ref,
+            false,
+        );
+        let mut tc = TypeChecker::new();
+        assert!(
+            tc.infer_expr(&ctx, &invoke_callback("pure_consumer", "unknown"))
+                .is_err(),
+            "unresolved actual callback effects must not be made pure"
+        );
+    }
+
     #[test]
     fn test_mgu_opaque_nominal_rejects_underlying() {
         let html = Type::Nominal {
