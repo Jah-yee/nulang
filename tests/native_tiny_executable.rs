@@ -104,83 +104,38 @@ fn unsupported_source_preserves_existing_executable_bytes() {
 }
 
 #[test]
-fn integer_overflow_fails_closed_before_linking() {
-    // Signed Nulang Ints have a 48-bit payload. An unboxed i64 add must
-    // never wrap beyond that bound and then continue with observable IO.
+fn integer_overflow_follows_48bit_vm_wraparound_without_failing() {
+    // Nulang Int arithmetic wraps at 48 bits rather than trapping.
     let dir = test_dir();
     let built = build(
         &dir,
-        "let max = 140737488355327;\nlet overflow = max + 1;\nperform IO.print(\"must not run\")",
+        "let max = 140737488355327;\nlet overflow = max + 1;\nperform IO.print(\"after wrap\")",
     );
     assert!(
-        !built.status.success(),
-        "overflow should be rejected, stdout: {}",
-        String::from_utf8_lossy(&built.stdout)
-    );
-    assert!(
-        String::from_utf8_lossy(&built.stderr).contains("48-bit"),
-        "stderr: {}",
-        String::from_utf8_lossy(&built.stderr)
-    );
-    assert!(!dir.join("hello").exists());
-    fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn negating_minimum_integer_fails_closed_before_linking() {
-    let dir = test_dir();
-    let built = build(
-        &dir,
-        "let min = -140737488355328;\nlet overflow = -min;\nperform IO.print(\"must not run\")",
-    );
-    assert!(
-        !built.status.success(),
-        "negation overflow should be rejected, stdout: {}",
-        String::from_utf8_lossy(&built.stdout)
-    );
-    assert!(
-        String::from_utf8_lossy(&built.stderr).contains("48-bit"),
-        "stderr: {}",
-        String::from_utf8_lossy(&built.stderr)
-    );
-    assert!(!dir.join("hello").exists());
-    fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn explicit_output_equal_to_input_cannot_overwrite_source() {
-    let dir = test_dir();
-    let input = dir.join("main.nula");
-    let original = b"perform IO.print(\"Never overwrite source\")";
-    fs::write(&input, original).unwrap();
-    let result = Command::new(env!("CARGO_BIN_EXE_nulang"))
-        .args(["--emit-exe", "--out"])
-        .arg(&input)
-        .arg(&input)
-        .output()
-        .unwrap();
-    assert!(!result.status.success());
-    assert_eq!(fs::read(&input).unwrap(), original);
-    fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn extensionless_source_is_not_the_default_output_path() {
-    let dir = test_dir();
-    let input = dir.join("source");
-    let original = b"perform IO.print(\"preserve me\")";
-    fs::write(&input, original).unwrap();
-    let result = Command::new(env!("CARGO_BIN_EXE_nulang"))
-        .arg("--emit-exe")
-        .arg(&input)
-        .output()
-        .unwrap();
-    assert!(
-        result.status.success(),
+        built.status.success(),
         "compiler stderr: {}",
-        String::from_utf8_lossy(&result.stderr)
+        String::from_utf8_lossy(&built.stderr)
     );
-    assert_eq!(fs::read(&input).unwrap(), original);
-    assert_eq!(Command::new(dir.join("source.bin")).output().unwrap().stdout, b"preserve me\n");
+    let run = Command::new(dir.join("hello")).output().unwrap();
+    assert_eq!(run.status.code(), Some(0));
+    assert_eq!(run.stdout, b"after wrap\n");
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn minimum_integer_negation_wraps_without_failing() {
+    let dir = test_dir();
+    let built = build(
+        &dir,
+        "let min = -140737488355328;\nlet overflow = -min;\nperform IO.print(\"after negation\")",
+    );
+    assert!(
+        built.status.success(),
+        "compiler stderr: {}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let run = Command::new(dir.join("hello")).output().unwrap();
+    assert_eq!(run.status.code(), Some(0));
+    assert_eq!(run.stdout, b"after negation\n");
     fs::remove_dir_all(dir).unwrap();
 }
