@@ -394,25 +394,58 @@ fn unify_actor_ref_attenuation(
     Ok(subst)
 }
 
+/// Merge minimum required effect-row allowances. Closed requirements
+/// contribute concrete effects; open requirements retain their unknown tail.
+/// Distinct unresolved actual tails cannot be combined without a row-union
+/// constraint, so fail closed rather than inventing a fresh unbound tail.
+fn merge_callback_minima(
+    prior: &EffectRow,
+    incoming: &EffectRow,
+    span: Span,
+) -> NuResult<EffectRow> {
+    let mut effects: Vec<Effect> = prior
+        .effects()
+        .iter()
+        .chain(incoming.effects())
+        .cloned()
+        .collect();
+    effects.sort();
+    effects.dedup();
+    match (prior, incoming) {
+        (EffectRow::Closed(_), EffectRow::Closed(_)) => Ok(EffectRow::Closed(effects)),
+        (EffectRow::Open(_, tail), EffectRow::Closed(_))
+        | (EffectRow::Closed(_), EffectRow::Open(_, tail)) => {
+            Ok(EffectRow::Open(effects, *tail))
+        }
+        (EffectRow::Open(_, first), EffectRow::Open(_, second)) if first == second => {
+            Ok(EffectRow::Open(effects, *first))
+        }
+        _ => Err(NuError::type_error(
+            "cannot join independent unresolved callback effect tails".to_string(),
+            span,
+        )),
+    }
+}
+
 /// Specialize a callback parameter's open *allowance* for one application.
 ///
-/// This is intentionally directional: an unknown actual tail cannot be
-/// assigned to a closed contract. A fresh solver is shared across all callback
-/// arguments of the same call, so constraints on the same expected tail must
-/// agree. Do not retain it across calls: existing HM instantiation does not
-/// freshen every row variable in a polymorphic scheme.
+/// Assignment gives a *lower bound* on an expected open row variable, not an
+/// equality constraint for each individual argument. Collect all lower bounds
+/// first; solving an exact equality after the first argument would reject a
+/// later, compatible callback with additional effects. The completed witness
+/// is substituted into the call signature only after every argument checks.
 fn constrain_callback_argument(
     found: &Type,
     expected: &Type,
     span: Span,
-    solver: &mut EffectRowSolver,
+    solver: &EffectRowSolver,
+    minima: &mut FxHashMap<Region, EffectRow>,
 ) -> NuResult<Substitution> {
-    let mut candidate = solver.clone();
     let solve_error = |error: crate::effect_row_solver::EffectRowSolveError| {
         NuError::type_error(format!("effect-row constraint: {error}"), span)
     };
-    let actual = candidate.apply_to_type(found).map_err(solve_error)?;
-    let permitted = candidate.apply_to_type(expected).map_err(solve_error)?;
+    let actual = solver.apply_to_type(found).map_err(solve_error)?;
+    let permitted = solver.apply_to_type(expected).map_err(solve_error)?;
     let (
         Type::Function {
             effect: actual_row, ..
@@ -425,38 +458,61 @@ fn constrain_callback_argument(
         return mgu_assignable(&actual, &permitted, span);
     };
 
-    if !crate::effect_checker::effect_row_subset(actual_row, allowed_row) {
-        let EffectRow::Open(allowed_known, allowed_tail) = allowed_row else {
-            return Err(NuError::type_mismatch(
-                format!("callback with effects {allowed_row}"),
-                format!("callback with effects {actual_row}"),
-                span,
-            ));
-        };
-        let needed = actual_row
-            .effects()
-            .iter()
-            .filter(|eff| !allowed_known.contains(eff))
-            .cloned()
-            .collect::<Vec<_>>();
-        let extension = match actual_row {
-            EffectRow::Closed(_) => EffectRow::Closed(needed),
-            EffectRow::Open(_, actual_tail) if actual_tail != allowed_tail => {
-                EffectRow::Open(needed, *actual_tail)
-            }
-            // Without a row-lacks constraint, specializing a shared tail
-            // cannot prove an unknown effect is permitted. Stay fail-closed.
-            _ => {
+    // A single argument can demand additional effects of the expected row,
+    // but must never eliminate the unknown tail on an actual callback.
+    let mut proposed = minima.clone();
+    match allowed_row {
+        EffectRow::Closed(_) => {
+            if !crate::effect_checker::effect_row_subset(actual_row, allowed_row) {
                 return Err(NuError::type_mismatch(
                     format!("callback with effects {allowed_row}"),
                     format!("callback with effects {actual_row}"),
                     span,
                 ));
             }
-        };
-        candidate.bind(*allowed_tail, extension).map_err(solve_error)?;
+        }
+        EffectRow::Open(allowed_known, allowed_tail) => {
+            let mut extra: Vec<Effect> = actual_row
+                .effects()
+                .iter()
+                .filter(|eff| !allowed_known.contains(eff))
+                .cloned()
+                .collect();
+            extra.sort();
+            extra.dedup();
+
+            // The same unknown tail cannot justify additional fixed
+            // effects in a different position without an explicit row-lacks
+            // or inclusion proof. Preserve the fail-closed rule.
+            if matches!(actual_row, EffectRow::Open(_, tail) if tail == allowed_tail) {
+                if !crate::effect_checker::effect_row_subset(actual_row, allowed_row) {
+                    return Err(NuError::type_mismatch(
+                        format!("callback with effects {allowed_row}"),
+                        format!("callback with effects {actual_row}"),
+                        span,
+                    ));
+                }
+            } else {
+                let demand = match actual_row {
+                    EffectRow::Closed(_) => EffectRow::Closed(extra),
+                    EffectRow::Open(_, tail) => EffectRow::Open(extra, *tail),
+                };
+                let combined = match proposed.get(allowed_tail) {
+                    Some(prior) => merge_callback_minima(prior, &demand, span)?,
+                    None => demand,
+                };
+                proposed.insert(*allowed_tail, combined);
+            }
+        }
     }
 
+    // Check the *aggregate* requirements against the original callback
+    // contracts; only publish the updated minima once the structural
+    // parameter, return, and capability checks also pass.
+    let mut candidate = solver.clone();
+    for (tail, demand) in &proposed {
+        candidate.bind(*tail, demand.clone()).map_err(solve_error)?;
+    }
     let actual = candidate.apply_to_type(&actual).map_err(solve_error)?;
     let permitted = candidate.apply_to_type(&permitted).map_err(solve_error)?;
     let (
@@ -472,7 +528,7 @@ fn constrain_callback_argument(
         },
     ) = (&actual, &permitted)
     else {
-        unreachable!("substitution preserves the function type constructor")
+        unreachable!("row substitutions preserve the function type constructor")
     };
     if !crate::effect_checker::effect_row_subset(actual_effect, allowed_effect) {
         return Err(NuError::type_mismatch(
@@ -481,10 +537,6 @@ fn constrain_callback_argument(
             span,
         ));
     }
-
-    // Effect inclusion was proved directionally. Normalize only this effect
-    // field for symmetric HM unification, without replacing the callback's
-    // parameter type, return type, or capability.
     let adapted = Type::Function {
         param: param.clone(),
         ret: ret.clone(),
@@ -492,7 +544,7 @@ fn constrain_callback_argument(
         cap: *cap,
     };
     let subst = mgu(&adapted, &permitted, span)?;
-    *solver = candidate;
+    *minima = proposed;
     Ok(subst)
 }
 
@@ -2466,6 +2518,7 @@ impl TypeChecker {
         let mut arg_types = vec![];
         // Rows are specialized per call, never across unrelated invocations.
         let mut row_solver = EffectRowSolver::new();
+        let mut callback_minima: FxHashMap<Region, EffectRow> = FxHashMap::default();
 
         // Infer each argument
         for arg in args {
@@ -2561,7 +2614,8 @@ impl TypeChecker {
                                 &resolved_found,
                                 &resolved_expected,
                                 span,
-                                &mut row_solver,
+                                &row_solver,
+                                &mut callback_minima,
                             )?
                         } else {
                             mgu_assignable(&resolved_found, &resolved_expected, span)?
@@ -2576,6 +2630,15 @@ impl TypeChecker {
                     }
                 }
             }
+        }
+
+        // Solve the combined lower bounds only after every callback argument
+        // has been checked; early binding would turn a minimum into an
+        // incorrect exact constraint and reject compatible later callbacks.
+        for (tail, demand) in callback_minima {
+            row_solver
+                .bind(tail, demand)
+                .map_err(|e| NuError::type_error(format!("effect-row constraint: {e}"), span))?;
         }
 
         // Create a fresh result type
