@@ -127,7 +127,7 @@ jobs:
         shell: bash
         run: |
           # readelf understands both native x86_64 and cross-built aarch64 ELF.
-          if readelf -d target/${{ matrix.target }}/release/nulang | grep -Eq 'Shared library: \\[libpython'; then
+          if readelf -d target/${{ matrix.target }}/release/nulang | grep -Eq 'Shared library: \[libpython'; then
             echo "::error::Public release CLI unexpectedly depends on libpython"
             exit 1
           fi
@@ -195,6 +195,38 @@ jobs:
               shasum -a 256 "${{ matrix.artifact }}.tar.gz" > "${{ matrix.artifact }}.tar.gz.sha256"
             fi
           )
+
+      - name: Verify packaged archive and checksum
+        shell: bash
+        run: |
+          (
+            cd dist
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum -c "${{ matrix.artifact }}.tar.gz.sha256"
+            else
+              shasum -a 256 -c "${{ matrix.artifact }}.tar.gz.sha256"
+            fi
+          )
+          test "$(tar tzf dist/${{ matrix.artifact }}.tar.gz)" = "${{ matrix.artifact }}"
+
+      - name: Smoke extracted native release archive
+        if: matrix.target != 'aarch64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          mkdir -p release-smoke
+          tar xzf dist/${{ matrix.artifact }}.tar.gz -C release-smoke
+          bin="$PWD/release-smoke/${{ matrix.artifact }}"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            mv "$bin" "$bin.exe"
+            bin="$bin.exe"
+          fi
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            bash scripts/check_release_linux.sh "$bin"
+          else
+            "$bin" --version
+            output="$("$bin" --eval 'perform IO.print("release-smoke")')"
+            test "$output" = "release-smoke"
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
