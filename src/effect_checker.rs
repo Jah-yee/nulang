@@ -587,17 +587,15 @@ impl EffectChecker {
                 body,
                 effect,
                 ..
-            } => {
-                self.with_param_scope(params, |checker| {
-                    if let Some(ann) = effect {
-                        let lambda_ctx = EffectContext::with_allowed(ann.clone());
-                        checker.check_effects(&lambda_ctx, body, ann)?;
-                        Ok(ann.clone())
-                    } else {
-                        checker.infer_effects(ctx, body)
-                    }
-                })
-            }
+            } => self.with_param_scope(params, |checker| {
+                if let Some(ann) = effect {
+                    let lambda_ctx = EffectContext::with_allowed(ann.clone());
+                    checker.check_effects(&lambda_ctx, body, ann)?;
+                    Ok(ann.clone())
+                } else {
+                    checker.infer_effects(ctx, body)
+                }
+            }),
 
             // Application: effects of function + arguments, plus the callee's
             // own row when this is a direct call to a known module-level
@@ -1074,9 +1072,8 @@ impl EffectChecker {
                     ..
                 } = decl
                 {
-                    let inferred = self.with_param_scope(params, |checker| {
-                        checker.infer_effects(&ctx, body)
-                    })?;
+                    let inferred =
+                        self.with_param_scope(params, |checker| checker.infer_effects(&ctx, body))?;
                     let entry = self
                         .fn_rows
                         .entry(name.clone())
@@ -4861,9 +4858,7 @@ mod tests {
 
     #[test]
     fn test_check_module_rejects_effectful_typed_callback_in_pure_function() {
-        let ast = parse_module(
-            "fn invoke(cb: () -> Unit ! {IO}) -> Unit ! {} { cb() }",
-        );
+        let ast = parse_module("fn invoke(cb: () -> Unit ! {IO}) -> Unit ! {} { cb() }");
         let mut checker = EffectChecker::new();
         assert!(
             checker.check_module(&ast.decls).is_err(),
@@ -4873,9 +4868,7 @@ mod tests {
 
     #[test]
     fn test_infer_module_function_row_from_callback_parameter() {
-        let ast = parse_module(
-            "fn invoke(cb: () -> Unit ! {FS}) -> Unit { cb() }",
-        );
+        let ast = parse_module("fn invoke(cb: () -> Unit ! {FS}) -> Unit { cb() }");
         let flat = flatten_decls(&ast.decls);
         let mut checker = EffectChecker::new();
         checker.register_function_rows(&flat).unwrap();
@@ -4887,9 +4880,7 @@ mod tests {
 
     #[test]
     fn test_check_module_allows_typed_callback_effect_within_contract() {
-        let ast = parse_module(
-            "fn invoke(cb: () -> Unit ! {IO}) -> Unit ! {IO} { cb() }",
-        );
+        let ast = parse_module("fn invoke(cb: () -> Unit ! {IO}) -> Unit ! {IO} { cb() }");
         let mut checker = EffectChecker::new();
         assert!(checker.check_module(&ast.decls).is_ok());
     }
@@ -4915,7 +4906,9 @@ mod tests {
         };
         let mut checker = EffectChecker::new();
         assert!(
-            checker.infer_effects(&EffectContext::empty(), &lambda).is_err(),
+            checker
+                .infer_effects(&EffectContext::empty(), &lambda)
+                .is_err(),
             "pure lambda must reject invoking an IO-typed callback"
         );
     }
@@ -4957,7 +4950,9 @@ mod tests {
             span: s(),
         };
         assert!(
-            checker.infer_effects(&EffectContext::empty(), &lambda).is_ok(),
+            checker
+                .infer_effects(&EffectContext::empty(), &lambda)
+                .is_ok(),
             "locally shadowed pure closure must not inherit an outer callback's effects"
         );
     }
