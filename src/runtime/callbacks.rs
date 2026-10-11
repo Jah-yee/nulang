@@ -2639,6 +2639,35 @@ mod migration_authority_tests {
 }
 
 #[cfg(test)]
+mod web_redirect_security_tests {
+    use super::render_web_redirect;
+
+    #[test]
+    fn redirects_escape_attribute_breakout_payloads() {
+        let html = render_web_redirect("/next?name=\" onload=\"alert(1)").unwrap();
+        assert!(html.contains("url=/next?name=&quot; onload=&quot;alert(1)"));
+        assert!(!html.contains("url=/next?name=\" onload="));
+        assert!(render_web_redirect("/dashboard").is_some());
+        assert!(render_web_redirect("https://example.com/path").is_some());
+    }
+
+    #[test]
+    fn rejects_scriptable_schemes_and_control_characters() {
+        for target in [
+            "",
+            "javascript:alert(1)",
+            "JaVaScRiPt:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "vbscript:msgbox(1)",
+            "/next\r\nSet-Cookie: leaked=1",
+            " https://example.com",
+        ] {
+            assert!(render_web_redirect(target).is_none(), "accepted {target:?}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod host_authority_tests {
     use super::{authorize_actor_host_effect, http_outbound_authority, required_host_authority};
     use crate::authority::{AuthorityGrant, AuthorityManifest};
