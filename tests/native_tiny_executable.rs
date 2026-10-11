@@ -102,3 +102,47 @@ fn unsupported_source_preserves_existing_executable_bytes() {
     assert_eq!(fs::read(&artifact).unwrap(), b"existing-good-artifact");
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn integer_overflow_fails_closed_before_linking() {
+    // Signed Nulang Ints have a 48-bit payload. An unboxed i64 add must
+    // never wrap beyond that bound and then continue with observable IO.
+    let dir = test_dir();
+    let built = build(
+        &dir,
+        "let max = 140737488355327;\nlet overflow = max + 1;\nperform IO.print(\"must not run\")",
+    );
+    assert!(
+        !built.status.success(),
+        "overflow should be rejected, stdout: {}",
+        String::from_utf8_lossy(&built.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&built.stderr).contains("48-bit"),
+        "stderr: {}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    assert!(!dir.join("hello").exists());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn negating_minimum_integer_fails_closed_before_linking() {
+    let dir = test_dir();
+    let built = build(
+        &dir,
+        "let min = -140737488355328;\nlet overflow = -min;\nperform IO.print(\"must not run\")",
+    );
+    assert!(
+        !built.status.success(),
+        "negation overflow should be rejected, stdout: {}",
+        String::from_utf8_lossy(&built.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&built.stderr).contains("48-bit"),
+        "stderr: {}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    assert!(!dir.join("hello").exists());
+    fs::remove_dir_all(dir).unwrap();
+}
