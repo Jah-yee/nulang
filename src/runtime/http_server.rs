@@ -1483,6 +1483,13 @@ mod tests {
     }
 
     #[test]
+    fn sse_heartbeat_is_a_comment_and_not_an_application_message() {
+        let mut wire = Vec::new();
+        WebDevServer::write_sse_keepalive(&mut wire).unwrap();
+        assert_eq!(wire, b": keep-alive\n\n");
+    }
+
+    #[test]
     fn realtime_registry_preserves_active_rooms_at_capacity() {
         let mut registry = RealtimeRegistry::default();
         let mut active = Vec::new();
