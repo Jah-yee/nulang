@@ -5098,9 +5098,9 @@ mod tests {
     #[test]
     fn test_check_src_rejects_open_callback_passed_to_pure_parameter() {
         let source = r#"
-            fn invokes_open(cb: () -> Unit ! {IO, | row}) -> Unit { cb() }
+            fn open_callback() -> Unit ! {IO, | row} { perform IO.print("side effect") }
             fn requires_pure(cb: () -> Unit ! {}) -> Unit { cb() }
-            requires_pure(invokes_open)
+            requires_pure(open_callback)
         "#;
         assert!(
             check_src(source).is_err(),
