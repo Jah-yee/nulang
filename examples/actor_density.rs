@@ -149,7 +149,10 @@ fn run_layout() {
     );
     println!("actor_layout_field_format=name,offset,bytes");
     for field in fields {
-        println!("actor_layout_field={},{},{}", field.name, field.offset, field.bytes);
+        println!(
+            "actor_layout_field={},{},{}",
+            field.name, field.offset, field.bytes
+        );
     }
 }
 
@@ -345,7 +348,11 @@ mod layout_tests {
         assert!(names.contains(&"flight_recorder"));
         assert!(names.contains(&"state_data"));
         assert!(names.contains(&"held_objects"));
-        assert!(fields.iter().all(|field| field.offset + field.bytes <= size_of::<Actor>()));
-        assert!(fields.windows(2).all(|window| window[0].bytes >= window[1].bytes));
+        assert!(fields
+            .iter()
+            .all(|field| field.offset + field.bytes <= size_of::<Actor>()));
+        assert!(fields
+            .windows(2)
+            .all(|window| window[0].bytes >= window[1].bytes));
     }
 }
