@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 use std::fmt;
 
-use super::{Actor, Runtime};
+use super::{Actor, MessageAdmission, Runtime};
 use crate::vm::Value;
 
 /// Errors returned by the local embedded actor host.
@@ -16,6 +16,7 @@ pub enum HostError {
     ActorLimitReached,
     UnknownActor,
     UnknownBehavior,
+    MailboxFull,
     DuplicateBehavior,
     IntegerOutOfRange,
 }
@@ -27,6 +28,7 @@ impl fmt::Display for HostError {
             Self::ActorLimitReached => "embedded actor limit reached",
             Self::UnknownActor => "unknown embedded actor",
             Self::UnknownBehavior => "unknown embedded actor behavior",
+            Self::MailboxFull => "embedded actor mailbox is full",
             Self::DuplicateBehavior => "actor behavior is already registered",
             Self::IntegerOutOfRange => "integer does not fit Nulang's 48-bit Int representation",
         };
@@ -117,8 +119,9 @@ impl EmbeddedActorHost {
 
     /// Send an integer-only message to an owned local actor.
     ///
-    /// Success means the message was submitted to the runtime's mailbox
-    /// admission path, not that it was executed or durably acknowledged.
+    /// Success confirms local mailbox admission, not execution or durable
+    /// delivery. A full mailbox returns explicit backpressure without
+    /// losing another message silently.
     pub fn send_int(
         &mut self,
         actor_id: u64,
@@ -134,16 +137,25 @@ impl EmbeddedActorHost {
             .as_ref()
             .and_then(|runtime| runtime.actors.get(&actor_id))
             .ok_or(HostError::UnknownActor)?;
-        if !actor.behavior_table.iter().any(|behavior| behavior.name == name) {
-            return Err(HostError::UnknownBehavior);
-        }
+        let behavior_id = actor
+            .behavior_table
+            .iter()
+            .position(|behavior| behavior.name == name)
+            .ok_or(HostError::UnknownBehavior)?;
+        let behavior_id = u16::try_from(behavior_id).map_err(|_| HostError::UnknownBehavior)?;
         let values = args
             .iter()
             .copied()
             .map(Self::checked_int)
             .collect::<Result<Vec<_>, _>>()?;
-        self.runtime_mut()?.send_message(actor_id, name, &values);
-        Ok(())
+        match self
+            .runtime_mut()?
+            .deliver_local_message(actor_id, behavior_id, &values, None)
+        {
+            MessageAdmission::Accepted => Ok(()),
+            MessageAdmission::Backpressured => Err(HostError::MailboxFull),
+            MessageAdmission::Rejected => Err(HostError::UnknownActor),
+        }
     }
 
     /// Read a primitive integer state field, or None if the field is absent
