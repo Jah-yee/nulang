@@ -4814,6 +4814,109 @@ mod tests {
     }
 
     #[test]
+    fn test_check_module_rejects_effectful_typed_callback_in_pure_function() {
+        let ast = parse_module(
+            "fn invoke(cb: () -> Unit ! {IO}) -> Unit ! {} { cb() }",
+        );
+        let mut checker = EffectChecker::new();
+        assert!(
+            checker.check_module(&ast.decls).is_err(),
+            "a callback parameter's annotated IO effect must not disappear"
+        );
+    }
+
+    #[test]
+    fn test_infer_module_function_row_from_callback_parameter() {
+        let ast = parse_module(
+            "fn invoke(cb: () -> Unit ! {FS}) -> Unit { cb() }",
+        );
+        let flat = flatten_decls(&ast.decls);
+        let mut checker = EffectChecker::new();
+        checker.register_function_rows(&flat).unwrap();
+        assert!(
+            checker.fn_rows["invoke"].contains(&Effect::FS),
+            "interprocedural function row must include callback effects"
+        );
+    }
+
+    #[test]
+    fn test_check_module_allows_typed_callback_effect_within_contract() {
+        let ast = parse_module(
+            "fn invoke(cb: () -> Unit ! {IO}) -> Unit ! {IO} { cb() }",
+        );
+        let mut checker = EffectChecker::new();
+        assert!(checker.check_module(&ast.decls).is_ok());
+    }
+
+    #[test]
+    fn test_typed_lambda_callback_effects_are_checked() {
+        let cb_type = Type::Function {
+            param: Box::new(Type::Tuple(vec![])),
+            ret: Box::new(Type::unit()),
+            effect: EffectRow::singleton(Effect::IO),
+            cap: Capability::Ref,
+        };
+        let lambda = Expr::Lambda {
+            params: vec![Param::new("cb", Some(cb_type))],
+            ret_type: None,
+            body: Box::new(Expr::App {
+                func: Box::new(Expr::Var("cb".to_string(), s())),
+                args: vec![],
+                span: s(),
+            }),
+            effect: Some(EffectRow::empty()),
+            span: s(),
+        };
+        let mut checker = EffectChecker::new();
+        assert!(
+            checker.infer_effects(&EffectContext::empty(), &lambda).is_err(),
+            "pure lambda must reject invoking an IO-typed callback"
+        );
+    }
+
+    #[test]
+    fn test_shadowed_typed_callback_does_not_charge_outer_effects() {
+        let mut checker = EffectChecker::new();
+        let callback_type = Type::Function {
+            param: Box::new(Type::Tuple(vec![])),
+            ret: Box::new(Type::unit()),
+            effect: EffectRow::singleton(Effect::IO),
+            cap: Capability::Ref,
+        };
+        let inner_call = Expr::App {
+            func: Box::new(Expr::Var("cb".to_string(), s())),
+            args: vec![],
+            span: s(),
+        };
+        let shadowing = Expr::Let {
+            name: "cb".to_string(),
+            ty: None,
+            value: Box::new(Expr::Lambda {
+                params: vec![],
+                ret_type: None,
+                body: Box::new(Expr::Literal(Literal::Unit, s())),
+                effect: None,
+                span: s(),
+            }),
+            body: Box::new(inner_call),
+            mutable: false,
+            let_in: false,
+            span: s(),
+        };
+        let lambda = Expr::Lambda {
+            params: vec![Param::new("cb", Some(callback_type))],
+            ret_type: None,
+            body: Box::new(shadowing),
+            effect: Some(EffectRow::empty()),
+            span: s(),
+        };
+        assert!(
+            checker.infer_effects(&EffectContext::empty(), &lambda).is_ok(),
+            "locally shadowed pure closure must not inherit an outer callback's effects"
+        );
+    }
+
+    #[test]
     fn test_state_machine_effect_checks_desugared_form() {
         // Hooks and the generated transition bodies are effect-checked
         // exactly like actor behaviors: the `perform IO.print` in the entry
