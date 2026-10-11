@@ -40,6 +40,18 @@ enum Kind {
 struct Slot {
     value: Value,
     kind: Kind,
+    // Every Int in this deliberately restricted straight-line backend is
+    // statically known. Retain its value so overflow cannot diverge from
+    // the VM's signed 48-bit arithmetic semantics.
+    constant_int: Option<i64>,
+}
+
+fn checked_int(value: i64) -> NuResult<i64> {
+    if crate::value_layout::int48_in_range(value) {
+        Ok(value)
+    } else {
+        Err(error("integer arithmetic exceeds signed 48-bit range"))
+    }
 }
 
 fn lookup(slots: &[Option<Slot>], id: mir::LocalId) -> NuResult<Slot> {
@@ -139,19 +151,37 @@ fn compile_object(mir: &mir::Module) -> NuResult<Vec<u8>> {
                 RValue::Const(Constant::String(s)) => {
                     let data_id = strings.get(s).ok_or_else(|| error("missing string data"))?;
                     let global = module.declare_data_in_func(*data_id, fb.func);
-                    Slot { value: fb.ins().symbol_value(ptr_ty, global), kind: Kind::String }
+                    Slot { value: fb.ins().symbol_value(ptr_ty, global), kind: Kind::String, constant_int: None }
                 }
-                RValue::Const(Constant::Int(n)) => Slot {
-                    value: fb.ins().iconst(types::I64, *n), kind: Kind::Int,
+                RValue::Const(Constant::Int(n)) => {
+                    let value = checked_int(*n)?;
+                    Slot {
+                        value: fb.ins().iconst(types::I64, value),
+                        kind: Kind::Int,
+                        constant_int: Some(value),
+                    }
                 },
                 RValue::Const(Constant::Unit) => Slot {
-                    value: fb.ins().iconst(types::I64, 0), kind: Kind::Unit,
+                    value: fb.ins().iconst(types::I64, 0),
+                    kind: Kind::Unit,
+                    constant_int: None,
                 },
                 RValue::Load(src) => lookup(&slots, *src)?,
                 RValue::Unary(UnOp::Neg, src) => {
                     let x = lookup(&slots, *src)?;
-                    if x.kind != Kind::Int { return Err(error("unary negation of non-Int")); }
-                    Slot { value: fb.ins().ineg(x.value), kind: Kind::Int }
+                    if x.kind != Kind::Int {
+                        return Err(error("unary negation of non-Int"));
+                    }
+                    let raw = x.constant_int.ok_or_else(|| error("unknown integer value"))?;
+                    let negated = raw
+                        .checked_neg()
+                        .ok_or_else(|| error("integer arithmetic exceeds signed 48-bit range"))?;
+                    let checked = checked_int(negated)?;
+                    Slot {
+                        value: fb.ins().ineg(x.value),
+                        kind: Kind::Int,
+                        constant_int: Some(checked),
+                    }
                 }
                 RValue::Binary(operator, lhs, rhs) => {
                     let a = lookup(&slots, *lhs)?;
@@ -159,13 +189,18 @@ fn compile_object(mir: &mir::Module) -> NuResult<Vec<u8>> {
                     if a.kind != Kind::Int || b.kind != Kind::Int {
                         return Err(error("binary operation on non-Int"));
                     }
-                    let value = match operator {
-                        BinOp::Add => fb.ins().iadd(a.value, b.value),
-                        BinOp::Sub => fb.ins().isub(a.value, b.value),
-                        BinOp::Mul => fb.ins().imul(a.value, b.value),
+                    let lhs = a.constant_int.ok_or_else(|| error("unknown integer value"))?;
+                    let rhs = b.constant_int.ok_or_else(|| error("unknown integer value"))?;
+                    let (value, result) = match operator {
+                        BinOp::Add => (fb.ins().iadd(a.value, b.value), lhs.checked_add(rhs)),
+                        BinOp::Sub => (fb.ins().isub(a.value, b.value), lhs.checked_sub(rhs)),
+                        BinOp::Mul => (fb.ins().imul(a.value, b.value), lhs.checked_mul(rhs)),
                         _ => return Err(error(format!("binary operator {operator:?}"))),
                     };
-                    Slot { value, kind: Kind::Int }
+                    let result = result
+                        .ok_or_else(|| error("integer arithmetic exceeds signed 48-bit range"))?;
+                    let checked = checked_int(result)?;
+                    Slot { value, kind: Kind::Int, constant_int: Some(checked) }
                 }
                 RValue::Perform { effect, op, args, resolved_handler: None }
                     if effect == "IO" && (op == "print" || op == "println") && args.len() == 1 =>
@@ -175,7 +210,7 @@ fn compile_object(mir: &mir::Module) -> NuResult<Vec<u8>> {
                         return Err(error("IO.print argument must be a String"));
                     }
                     fb.ins().call(puts_ref, &[arg.value]);
-                    Slot { value: fb.ins().iconst(types::I64, 0), kind: Kind::Unit }
+                    Slot { value: fb.ins().iconst(types::I64, 0), kind: Kind::Unit, constant_int: None }
                 }
                 other => return Err(error(format!("MIR operation {other:?}"))),
             };
