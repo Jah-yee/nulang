@@ -1089,14 +1089,8 @@ pub unsafe extern "C" fn nulang_runtime_register_native_function(
     let signature = super::marshal::Signature::new(params_slice.to_vec(), ret);
     // SAFETY: the embedding host guarantees that ptr matches signature and
     // that the callback remains live until the runtime is destroyed.
-    let function = unsafe {
-        super::native::NativeFunction::new(
-            ptr,
-            signature,
-            None,
-            name_str.to_string(),
-        )
-    };
+    let function =
+        unsafe { super::native::NativeFunction::new(ptr, signature, None, name_str.to_string()) };
     let registration = rt
         .ffi_registry
         .lock()
