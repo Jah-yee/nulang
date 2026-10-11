@@ -233,6 +233,31 @@ jobs:
       - name: Check zero warnings
         run: cargo check --locked --tests --no-default-features
 
+      - name: Smoke test standalone Savina runner
+        run: |
+          output="$(cargo run --locked --no-default-features --features savina-bench --bin nulang-savina -- --benchmark ping_pong --format jsonl)"
+          echo "$output"
+          echo "$output" | grep -F '"benchmark":"ping_pong"'
+
+  # -----------------------------------------------------------------------
+  # Opt-in standalone native executable smoke — isolates linker and ELF
+  # failures from the no-default-features interpreter baseline.
+  # -----------------------------------------------------------------------
+  native-executable:
+    name: Standalone Linux executable and size smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.95.0'
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
       # Compile and execute the first truly linked Nulang artifact using
       # only the opt-in native executable feature. Default/JIT-only builds
       # must not need cranelift-object or tempfile.
@@ -260,11 +285,6 @@ jobs:
             native-size-report.tsv
           if-no-files-found: error
           retention-days: 7
-      - name: Smoke test standalone Savina runner
-        run: |
-          output="$(cargo run --locked --no-default-features --features savina-bench --bin nulang-savina -- --benchmark ping_pong --format jsonl)"
-          echo "$output"
-          echo "$output" | grep -F '"benchmark":"ping_pong"'
 
   # -----------------------------------------------------------------------
   # WASM backend
