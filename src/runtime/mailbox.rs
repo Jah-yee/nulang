@@ -470,12 +470,19 @@ impl Mailbox {
         // candidate was rejected by its pattern/guard. It remains `tried` for
         // this receive expression but is no longer the commit target.
         self.active_match = None;
-        // There is nothing to index or stage on an empty mailbox. In
-        // particular, an actor waiting in a receive loop should not allocate
-        // three per-lane hash-map indexes before its first message arrives.
-        // queued_count also includes selectively staged messages, so this
-        // fast path cannot skip a live candidate.
-        if self.is_empty() {
+        // The relaxed queued_count is capacity bookkeeping, not a
+        // synchronization barrier for concurrent queue publication. A zero
+        // count must not hide a published message or a staged candidate.
+        // Inspect the actual queues and staged lanes instead: an entirely
+        // empty receive stays index-allocation-free, even if a producer has
+        // reserved capacity but has not published the message yet.
+        if self.system_skip_buffer.is_empty()
+            && self.local_skip_buffer.is_empty()
+            && self.skip_buffer.is_empty()
+            && self.local_queue.is_empty()
+            && self.system_queue.is_empty()
+            && self.normal_queue.is_empty()
+        {
             return None;
         }
         self.ensure_receive_indexes();
