@@ -775,6 +775,97 @@ mod tests {
     use super::*;
     use std::ffi::CString;
 
+    extern "C" fn scoped_value_one() -> i64 {
+        101
+    }
+
+    extern "C" fn scoped_value_two() -> i64 {
+        202
+    }
+
+    #[test]
+    fn test_embedded_native_functions_are_isolated_per_runtime() {
+        let first = nulang_runtime_new();
+        let second = nulang_runtime_new();
+        assert!(!first.is_null() && !second.is_null());
+
+        let name = CString::new("nulang_scoped_test_value").unwrap();
+        let rc_first = unsafe {
+            nulang_runtime_register_native_function(
+                first,
+                name.as_ptr(),
+                scoped_value_one as *const c_void,
+                std::ptr::null(),
+                0,
+                crate::ffi::marshal::CType::I64,
+            )
+        };
+        let rc_second = unsafe {
+            nulang_runtime_register_native_function(
+                second,
+                name.as_ptr(),
+                scoped_value_two as *const c_void,
+                std::ptr::null(),
+                0,
+                crate::ffi::marshal::CType::I64,
+            )
+        };
+        assert_eq!(rc_first, 0);
+        assert_eq!(rc_second, 0);
+
+        let source = CString::new(
+            "extern \\"__nulang_registered__\\" { fn nulang_scoped_test_value() -> Int } nulang_scoped_test_value()",
+        )
+        .unwrap();
+        let module_first = unsafe { nulang_compile(first, source.as_ptr()) };
+        let module_second = unsafe { nulang_compile(second, source.as_ptr()) };
+        assert!(module_first >= 0 && module_second >= 0);
+
+        let first_result = unsafe { nulang_run(first, module_first) };
+        let second_result = unsafe { nulang_run(second, module_second) };
+        assert_eq!(nulang_value_int(first_result), 101);
+        assert_eq!(nulang_value_int(second_result), 202);
+
+        unsafe { nulang_runtime_free(first) };
+        let second_again = unsafe { nulang_run(second, module_second) };
+        assert_eq!(nulang_value_int(second_again), 202);
+        unsafe { nulang_runtime_free(second) };
+    }
+
+    #[test]
+    fn test_embedded_runtime_does_not_inherit_other_runtime_callbacks() {
+        let owner = nulang_runtime_new();
+        let unregistered = nulang_runtime_new();
+
+        let name = CString::new("nulang_scoped_only_here").unwrap();
+        let registered = unsafe {
+            nulang_runtime_register_native_function(
+                owner,
+                name.as_ptr(),
+                scoped_value_one as *const c_void,
+                std::ptr::null(),
+                0,
+                crate::ffi::marshal::CType::I64,
+            )
+        };
+        assert_eq!(registered, 0);
+
+        let source = CString::new(
+            "extern \\"__nulang_registered__\\" { fn nulang_scoped_only_here() -> Int } nulang_scoped_only_here()",
+        )
+        .unwrap();
+        let handle = unsafe { nulang_compile(unregistered, source.as_ptr()) };
+        assert!(handle >= 0);
+        let value = unsafe { nulang_run(unregistered, handle) };
+        assert!(nulang_value_is_nil(value));
+        let error = unsafe { nulang_last_error(unregistered) };
+        assert!(!error.is_null(), "unregistered callback must not execute");
+        unsafe {
+            nulang_runtime_free(owner);
+            nulang_runtime_free(unregistered);
+        }
+    }
+
     #[test]
     fn test_c_api_compile_and_run() {
         let rt = nulang_runtime_new();
