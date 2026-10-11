@@ -20,6 +20,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Verify public CLI feature-profile parity
+        run: python3 -m unittest discover -s scripts/tests -p test_release_cli_profile.py
+
       - name: Verify tag matches crate and CLI versions
         shell: bash
         run: |
