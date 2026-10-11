@@ -2950,6 +2950,21 @@ mod tests {
     }
 
     #[test]
+    fn test_unresolved_open_effect_row_cannot_satisfy_closed_policy() {
+        // An unresolved row variable may hide IO even when no concrete
+        // effects have been inferred yet. It is not evidence of purity.
+        let unresolved = EffectRow::Open(vec![], Region::fresh());
+        let pure_policy = EffectRow::Closed(vec![]);
+        assert!(!effect_row_subset(&unresolved, &pure_policy));
+
+        // Merely listing known effects on both sides does not close the
+        // inferred row variable or prove that it contains nothing else.
+        let inferred = EffectRow::Open(vec![Effect::IO], Region::fresh());
+        let allowed = EffectRow::Closed(vec![Effect::IO]);
+        assert!(!effect_row_subset(&inferred, &allowed));
+    }
+
+    #[test]
     fn test_effect_row_union() {
         let a = EffectRow::Closed(vec![Effect::IO]);
         let b = EffectRow::Closed(vec![Effect::FS]);
