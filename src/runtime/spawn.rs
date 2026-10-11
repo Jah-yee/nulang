@@ -159,7 +159,10 @@ fn try_spawn_actor_with_id(
     };
 
     let mut actor = if let Some(mut pooled) = rt.actor_pool.pop() {
-        pooled.reset(id, format!("actor_{}", id), 0);
+        // Reuse the pooled actor's name buffer rather than allocating a new
+        // formatted String on every recycle. The reset still clears all
+        // per-actor state before the new actor becomes observable.
+        pooled.reset_with_generated_name(id, 0);
         pooled
     } else {
         Actor::new(id, format!("actor_{}", id), 0)
