@@ -1247,6 +1247,41 @@ mod tests {
     }
 
     #[test]
+    fn web_dev_server_rejects_foreign_posts_and_unknown_http_methods_over_tcp() {
+        fn send(port: u16, raw: &str) -> String {
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            stream.write_all(raw.as_bytes()).unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            response
+        }
+
+        let server = WebDevServer::bind(0, None, None, vec![]).unwrap();
+        let host = format!("localhost:{}", server.port);
+        let foreign = format!(
+            "POST /sign HTTP/1.1\r\nHost: {host}\r\nOrigin: https://attacker.example\r\nContent-Length: 0\r\n\r\n"
+        );
+        assert!(send(server.port, &foreign).starts_with("HTTP/1.1 403 Forbidden"));
+
+        let missing = format!(
+            "POST /sign HTTP/1.1\r\nHost: {host}\r\nContent-Length: 0\r\n\r\n"
+        );
+        assert!(send(server.port, &missing).starts_with("HTTP/1.1 403 Forbidden"));
+
+        let trusted = format!(
+            "POST /sign HTTP/1.1\r\nHost: {host}\r\nOrigin: http://{host}\r\nContent-Length: 0\r\n\r\n"
+        );
+        assert!(
+            send(server.port, &trusted).starts_with("HTTP/1.1 404 Not Found"),
+            "trusted provenance must reach routing instead of being rejected"
+        );
+
+        let unknown = format!("TRACE / HTTP/1.1\r\nHost: {host}\r\n\r\n");
+        assert!(send(server.port, &unknown).starts_with("HTTP/1.1 405 Method Not Allowed"));
+    }
+
+    #[test]
     fn mutation_provenance_is_checked_before_route_execution() {
         let mut request = HttpRequest {
             method: HttpMethod::Post,
