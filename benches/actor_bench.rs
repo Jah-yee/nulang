@@ -199,6 +199,25 @@ fn selective_receive_mailbox(depth: usize, hit_behavior: u16) -> Mailbox {
     mailbox
 }
 
+/// Empty selective receives often precede the actor's first message. Split
+/// the first poll (which previously allocated receive indexes) from repeated
+/// polls of an already-waiting mailbox; both exclude mailbox construction.
+fn bench_empty_selective_receive(c: &mut Criterion) {
+    let mut group = c.benchmark_group("actor/selective_receive_empty");
+    group.bench_function("first_poll", |b| {
+        b.iter_batched_ref(
+            || Mailbox::new(0),
+            |mailbox| black_box(mailbox.receive_match(black_box(&[42]))),
+            BatchSize::SmallInput,
+        )
+    });
+    group.bench_function("repeated_poll", |b| {
+        let mut mailbox = Mailbox::new(0);
+        b.iter(|| black_box(mailbox.receive_match(black_box(&[42]))))
+    });
+    group.finish();
+}
+
 fn bench_selective_receive(c: &mut Criterion) {
     const HIT: u16 = 60_000;
 
@@ -267,5 +286,6 @@ criterion_group!(
     bench_spawn_send_receive,
     bench_message_enqueue,
     bench_message_drain,
+    bench_empty_selective_receive,
     bench_selective_receive
 );
