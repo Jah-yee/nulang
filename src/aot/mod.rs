@@ -434,6 +434,10 @@ impl AotModule {
     /// parameterized function, and calling it with no args would return
     /// garbage.
     pub fn run(&self) -> NuResult<u64> {
+        // Compiled JIT helpers share this thread-local error slot. Begin each
+        // standalone AOT invocation with an empty channel so first-error
+        // preservation cannot report an earlier run's unrelated failure.
+        let _ = crate::jit::runtime::aot_take_pending_error();
         // A module with no `__main`/`main` (e.g. only function definitions, a
         // library) has no entry expression; running it yields nil, matching the
         // interpreter. Do NOT fall back to function 0 — that could be a
@@ -522,6 +526,9 @@ impl AotModule {
     /// The `AotModule` is consumed and registered with the runtime so that
     /// spawned actors dispatch their behaviors through native code.
     pub fn run_in_runtime(self, rt: &mut crate::runtime::Runtime) -> NuResult<u64> {
+        // Same top-level error boundary as run(): do not inherit a stale
+        // error from a prior JIT/native execution on this thread.
+        let _ = crate::jit::runtime::aot_take_pending_error();
         let Some(idx) = self.entry_idx else {
             return Ok(crate::vm::Value::nil().as_raw());
         };
