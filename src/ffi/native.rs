@@ -223,6 +223,11 @@ impl FfiRegistry {
             }
             return Ok(func);
         }
+        // The sentinel is reserved for host-registered callbacks; resolving a
+        // missing entry must never fall through to dlopen of an arbitrary path.
+        if library == "__nulang_registered__" {
+            return Err(format!("FFI callback {symbol} not registered in this runtime"));
+        }
         let lib = self.load_library(library)?;
         let symbol_name = symbol.to_string();
         // SAFETY: caller guarantees the symbol exists and has the requested type.
