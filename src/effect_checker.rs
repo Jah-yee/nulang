@@ -561,6 +561,43 @@ impl EffectChecker {
         result
     }
 
+    /// Find the declared effects of a locally scoped callback or an
+    /// unshadowed module function. An explicit None entry stops lookup:
+    /// a same-named pure binding cannot inherit an outer effectful row.
+    fn known_callable_row(&self, name: &str) -> Option<EffectRow> {
+        if let Some((_, row)) = self
+            .scoped_function_rows
+            .iter()
+            .rev()
+            .find(|(bound, _)| bound == name)
+        {
+            return row.clone();
+        }
+        if self.shadowed.contains(&name.to_string()) {
+            return None;
+        }
+        self.fn_rows.get(name).cloned()
+    }
+
+    /// Infer a body with a local alias that may carry a callable effect
+    /// annotation. Keep the binding scoped even when the row is unknown.
+    fn infer_with_callable_bound(
+        &mut self,
+        ctx: &EffectContext,
+        name: &str,
+        callable: Option<EffectRow>,
+        body: &Expr,
+    ) -> NuResult<EffectRow> {
+        let name_base = self.shadowed.len();
+        let row_base = self.scoped_function_rows.len();
+        self.shadowed.push(name.to_string());
+        self.scoped_function_rows.push((name.to_string(), callable));
+        let inferred = self.infer_effects(ctx, body);
+        self.scoped_function_rows.truncate(row_base);
+        self.shadowed.truncate(name_base);
+        inferred
+    }
+
     /// Infer the effect row of an expression.
     ///
     /// Returns the (upper-bound) effect row describing what effects the
@@ -607,17 +644,8 @@ impl EffectChecker {
                     row = effect_row_union(&row, &self.infer_effects(ctx, arg)?);
                 }
                 if let Expr::Var(name, _) = func.as_ref() {
-                    if self.shadowed.contains(name) {
-                        if let Some((_, Some(callee_row))) = self
-                            .scoped_function_rows
-                            .iter()
-                            .rev()
-                            .find(|(local, _)| local == name)
-                        {
-                            row = effect_row_union(&row, callee_row);
-                        }
-                    } else if let Some(callee_row) = self.fn_rows.get(name) {
-                        row = effect_row_union(&row, callee_row);
+                    if let Some(callee_row) = self.known_callable_row(name) {
+                        row = effect_row_union(&row, &callee_row);
                     }
                 }
                 Ok(row)
@@ -629,7 +657,17 @@ impl EffectChecker {
                 name, value, body, ..
             } => {
                 let val_row = self.infer_effects(ctx, value)?;
-                let body_row = self.infer_with_bound(ctx, std::slice::from_ref(name), body)?;
+                // Capture only statically known callable provenance. An
+                // unrelated local binding remains an explicit shadow.
+                let callable = match value.as_ref() {
+                    Expr::Var(source, _) => self.known_callable_row(source),
+                    Expr::Lambda {
+                        effect: Some(effect),
+                        ..
+                    } => Some(effect.clone()),
+                    _ => None,
+                };
+                let body_row = self.infer_with_callable_bound(ctx, name, callable, body)?;
                 Ok(effect_row_union(&val_row, &body_row))
             }
 
@@ -1119,10 +1157,10 @@ impl EffectChecker {
                 ..
             } => {
                 for b in behaviors {
-                    match &b.effect {
-                        Some(allowed) => self.check_effects(&ctx, &b.body, allowed)?,
-                        None => self.infer_effects(&ctx, &b.body).map(|_| ())?,
-                    }
+                    self.with_param_scope(&b.params, |checker| match &b.effect {
+                        Some(allowed) => checker.check_effects(&ctx, &b.body, allowed),
+                        None => checker.infer_effects(&ctx, &b.body).map(|_| ()),
+                    })?;
                 }
                 for (_, _, _, default) in state_fields {
                     self.infer_effects(&ctx, default)?;
