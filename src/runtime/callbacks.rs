@@ -301,6 +301,44 @@ pub(crate) fn authorize_actor_ffi(
 
 /// Shared Web effect host implementation for all runtime callback types.
 /// Mirrors the standalone VM dispatch in `src/vm.rs`.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('\"', "&quot;")
+        .replace('\'', "&#x27;")
+}
+
+/// Reject scriptable schemes and malformed redirect targets before composing
+/// a meta-refresh document. Relative and absolute HTTP(S) URLs are supported.
+fn render_web_redirect(url: &str) -> Option<String> {
+    if url.is_empty() || url != url.trim() || url.chars().any(char::is_control) {
+        return None;
+    }
+
+    if let Some(colon) = url.find(':') {
+        let prefix = &url[..colon];
+        let looks_like_scheme = prefix
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphabetic())
+            && prefix
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'));
+        if looks_like_scheme
+            && !prefix.eq_ignore_ascii_case("http")
+            && !prefix.eq_ignore_ascii_case("https")
+        {
+            return None;
+        }
+    }
+
+    Some(format!(
+        "<html><head><meta http-equiv=\"refresh\" content=\"0;url={}\"></head></html>",
+        html_escape(url)
+    ))
+}
+
 pub(crate) fn perform_web_builtin(
     callbacks: &mut dyn crate::vm::ActorVmCallbacks,
     op_name: Option<&str>,
@@ -329,14 +367,6 @@ pub(crate) fn perform_web_builtin(
     fn resolve(constants: &[crate::bytecode::Constant], value: crate::vm::Value) -> String {
         crate::vm::resolve_value_string(constants, value)
     }
-    fn html_escape(s: &str) -> String {
-        s.replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-            .replace('\"', "&quot;")
-            .replace('\'', "&#x27;")
-    }
-
     fn alloc_tuple(
         callbacks: &mut dyn crate::vm::ActorVmCallbacks,
         a: crate::vm::Value,
@@ -426,11 +456,10 @@ pub(crate) fn perform_web_builtin(
         Some("route") => Some(crate::vm::Value::unit()),
         Some("redirect") => {
             let url = resolve(constants, *regs.first()?);
-            let out = format!(
-                "<html><head><meta http-equiv=\"refresh\" content=\"0;url={}\"></head></html>",
-                url
-            );
-            Some(callbacks.alloc_string(&out))
+            match render_web_redirect(&url) {
+                Some(out) => Some(callbacks.alloc_string(&out)),
+                None => Some(crate::vm::Value::nil()),
+            }
         }
         Some("serve_static") => {
             let path = resolve(constants, *regs.first()?);
