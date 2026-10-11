@@ -3670,6 +3670,19 @@ mod tests {
     }
 
     #[test]
+    fn test_aot_entry_clears_stale_jit_arithmetic_error() {
+        // The JIT and AOT currently share this thread-local channel.
+        // A prior compiled helper must not poison an independent AOT run.
+        let aot = aot_compile_source(r#"fn main() -> Int { 42 }"#);
+        crate::jit::runtime::aot_set_pending_error("stale JIT error".to_string());
+        let raw = aot.run().expect("fresh AOT invocation must not inherit stale error");
+        assert_eq!(
+            unsafe { crate::vm::Value::from_raw(raw) }.as_int(),
+            Some(42)
+        );
+    }
+
+    #[test]
     fn test_aot_checked_neg_int48_min_overflow() {
         let mut builder = mir::FunctionBuilder::new("__main", Some(crate::types::Type::int()));
         let x = builder.add_temp(crate::types::Type::int());
