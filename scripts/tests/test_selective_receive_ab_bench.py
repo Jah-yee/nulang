@@ -74,6 +74,21 @@ class SelectiveReceiveAbBenchTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "first_poll"):
                     bench.criterion_case(root / "bench", root / "target", "first_poll", None, 1.0, 2.0)
 
+    def test_first_message_after_empty_poll_is_required(self):
+        self.assertEqual(
+            bench.CASES,
+            ("first_poll", "repeated_poll", "empty_then_arrival"),
+            "A win on empty-only polls may merely defer index allocation "
+            "until the first real message; the comparator must measure both",
+        )
+        with tempfile.TemporaryDirectory() as td:
+            path = pathlib.Path(td)
+            self.assertEqual(
+                bench.criterion_estimate_path(path, "empty_then_arrival"),
+                path / "actor_selective_receive_empty"
+                / "empty_then_arrival" / "new" / "estimates.json",
+            )
+
     def test_counterbalanced_run_order(self):
         self.assertEqual(bench.variant_order(0), ("base", "candidate"))
         self.assertEqual(bench.variant_order(1), ("candidate", "base"))
