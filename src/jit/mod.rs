@@ -5,8 +5,8 @@
 //!
 //! # Architecture
 //!
-//! - `JitSession`: Owns the Cranelift JIT module, tracks hot counters, and
-//!   manages compiled function pointers.
+//! - `JitSession`: Owns tiering/cache state and installed native pointers.
+//! - `native_codegen`: Machine-code backend boundary; Cranelift owns its modules/contexts there.
 //! - `region_planner`: Backend-neutral region, call-safety, recursion, and type analysis.
 //! - `compiler`: Translates a planned bytecode region to Cranelift IR (CLIF).
 //! - `typed_compiler`: Type-aware JIT that strips NaN-tag guards when types
@@ -31,6 +31,7 @@
 
 mod compiler;
 pub mod helpers;
+mod native_codegen;
 mod region_planner;
 pub mod runtime;
 pub mod simd_analyzer;
@@ -42,15 +43,15 @@ mod tests;
 
 pub use compiler::*;
 
-use region_planner::RegionPlanner;
+use native_codegen::{
+    CraneliftCodegen, NativeCodegenBackend, NativeCompileKind, NativeCompileRequest,
+};
 #[cfg(test)]
 use region_planner::{
     compute_may_suspend, compute_recursive, direct_call_target, find_compilable_region,
 };
+use region_planner::{native_leaf_plan, region_has_internal_back_edge, RegionPlanner};
 
-use cranelift::prelude::*;
-use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::Module;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 // ---------------------------------------------------------------------------
@@ -104,10 +105,22 @@ struct CompiledRegion {
     len: usize,
     tier: CompilationTier,
     optimization: CodegenOptimization,
+    /// True when this region can invoke a helper that re-enters the VM frame
+    /// stack. Such regions must execute against detached register storage:
+    /// pushing an interpreter frame can reallocate `VM::frames`, invalidating
+    /// a raw pointer into the caller's in-place register array.
+    requires_vm_reentry: bool,
     /// Wall-clock time spent in the compiler for the currently installed
     /// version of this region. This is intentionally per-region observability,
     /// not a benchmark substitute.
     compile_time_ns: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NativeLeafCall {
+    ptr: *const u8,
+    return_reg: u8,
+    required_args: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -120,10 +133,9 @@ struct CompiledRegion {
 /// - Compiles bytecode regions to native functions
 /// - Caches compiled function pointers by `(module_idx, bytecode offset)`
 pub struct JitSession {
-    /// Low-latency Cranelift module used for first-tier native compilation.
-    baseline_module: JITModule,
-    /// Speed-optimized Cranelift module used for hot-region replacement.
-    optimized_module: JITModule,
+    /// Native machine-code emitter. Tiering and cache ownership stay in this
+    /// session; compiler-specific modules/contexts stay behind this boundary.
+    codegen: CraneliftCodegen,
     /// Dense per-module table indexed `[module_idx][bytecode offset]`.
     ///
     /// The JIT probe runs on every JIT-enabled interpreter step. Once the
@@ -135,6 +147,9 @@ pub struct JitSession {
     compiled: Vec<Vec<Option<CompiledRegion>>>,
     /// Number of occupied compiled-region slots across all modules.
     compiled_count: usize,
+    /// Aggregate compiler-only telemetry across initial and replacement
+    /// compilations in this session.
+    compile_stats: crate::backends::JitCompileStats,
     /// Per-region execution counters for already-compiled code. When a
     /// region crosses TIER2_THRESHOLD, a more aggressive compilation is
     /// attempted. Reset after each promotion attempt.
@@ -154,12 +169,10 @@ pub struct JitSession {
     /// Backend-neutral region/safety/type analysis. Cranelift consumes the
     /// resulting plans but does not own the language-level planning rules.
     region_planner: RegionPlanner,
-    /// Reusable builder/codegen contexts for the low-latency module.
-    baseline_builder_context: FunctionBuilderContext,
-    baseline_ctx: codegen::Context,
-    /// Reusable builder/codegen contexts for optimized recompilation.
-    optimized_builder_context: FunctionBuilderContext,
-    optimized_ctx: codegen::Context,
+    /// Straight-line direct callees compiled specifically for calls from
+    /// native regions. These are not ordinary hot-entry regions: they execute
+    /// against an isolated register buffer owned by the direct-call helper.
+    native_leaf_calls: FxHashMap<(usize, usize), NativeLeafCall>,
     /// Monotonic suffix for replacement compilations. Cranelift keeps prior
     /// function declarations alive, so every promotion needs a fresh symbol.
     promotion_serial: u64,
@@ -170,67 +183,20 @@ impl JitSession {
     /// Returns `None` if the host platform is not supported or ISA finalization
     /// fails, printing a warning to stderr.
     pub fn new() -> Option<Self> {
-        let baseline_module = Self::new_cranelift_module("none", "single_pass")?;
-        let optimized_module = Self::new_cranelift_module("speed", "backtracking")?;
-        let baseline_ctx = baseline_module.make_context();
-        let optimized_ctx = optimized_module.make_context();
+        let codegen = CraneliftCodegen::new()?;
 
         Some(JitSession {
-            baseline_module,
-            optimized_module,
+            codegen,
             compiled: Vec::new(),
             compiled_count: 0,
+            compile_stats: crate::backends::JitCompileStats::default(),
             hot_counts: Vec::new(),
             typed_regions: FxHashSet::default(),
             region_planner: RegionPlanner::default(),
-            baseline_builder_context: FunctionBuilderContext::new(),
-            baseline_ctx,
-            optimized_builder_context: FunctionBuilderContext::new(),
-            optimized_ctx,
             tier2_counters: FxHashMap::default(),
+            native_leaf_calls: FxHashMap::default(),
             promotion_serial: 0,
         })
-    }
-
-    fn new_cranelift_module(opt_level: &str, regalloc_algorithm: &str) -> Option<JITModule> {
-        let mut flag_builder = settings::builder();
-        // Enable baseline SIMD support (SSE2 on x86_64, NEON on aarch64).
-        let _ = flag_builder.set("enable_simd", "true");
-        if let Err(e) = flag_builder.set("opt_level", opt_level) {
-            eprintln!(
-                "JIT: invalid Cranelift opt_level '{}': {} — JIT disabled",
-                opt_level, e
-            );
-            return None;
-        }
-        if let Err(e) = flag_builder.set("regalloc_algorithm", regalloc_algorithm) {
-            eprintln!(
-                "JIT: invalid Cranelift regalloc_algorithm '{}': {} — JIT disabled",
-                regalloc_algorithm, e
-            );
-            return None;
-        }
-        let isa_builder = match cranelift_native::builder() {
-            Ok(b) => b,
-            Err(msg) => {
-                eprintln!("JIT: host machine is not supported: {} — JIT disabled", msg);
-                return None;
-            }
-        };
-        let isa = match isa_builder.finish(settings::Flags::new(flag_builder)) {
-            Ok(isa) => isa,
-            Err(e) => {
-                eprintln!(
-                    "JIT: failed to finalize Cranelift ISA: {} — JIT disabled",
-                    e
-                );
-                return None;
-            }
-        };
-
-        let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
-        crate::jit::helpers::register_with_builder(&mut builder);
-        Some(JITModule::new(builder))
     }
 
     #[inline(always)]
@@ -257,6 +223,7 @@ impl JitSession {
             region_len,
             CompilationTier::Baseline,
             CodegenOptimization::Fast,
+            false,
             0,
         );
     }
@@ -269,6 +236,7 @@ impl JitSession {
         region_len: usize,
         tier: CompilationTier,
         optimization: CodegenOptimization,
+        requires_vm_reentry: bool,
         compile_time_ns: u64,
     ) {
         if module_idx >= self.compiled.len() {
@@ -282,11 +250,30 @@ impl JitSession {
         if row[offset].is_none() {
             self.compiled_count += 1;
         }
+        match optimization {
+            CodegenOptimization::Fast => {
+                self.compile_stats.fast_compiles =
+                    self.compile_stats.fast_compiles.saturating_add(1);
+                self.compile_stats.fast_compile_ns = self
+                    .compile_stats
+                    .fast_compile_ns
+                    .saturating_add(compile_time_ns);
+            }
+            CodegenOptimization::Optimized => {
+                self.compile_stats.optimized_compiles =
+                    self.compile_stats.optimized_compiles.saturating_add(1);
+                self.compile_stats.optimized_compile_ns = self
+                    .compile_stats
+                    .optimized_compile_ns
+                    .saturating_add(compile_time_ns);
+            }
+        }
         row[offset] = Some(CompiledRegion {
             ptr,
             len: region_len,
             tier,
             optimization,
+            requires_vm_reentry,
             compile_time_ns,
         });
     }
@@ -365,19 +352,33 @@ impl JitSession {
         pc: usize,
         module: &crate::bytecode::CodeModule,
     ) {
+        let Some(region) = self.compiled_entry(module_idx, pc) else {
+            self.tier2_counters.insert((module_idx, pc), 0);
+            return;
+        };
+
+        // A native loop region may execute thousands or millions of back-edge
+        // iterations inside a single region entry. Entry-count-only tiering
+        // therefore strands genuinely hot loops on the fast-compilation
+        // Cranelift tier. Preserve the normal threshold for straight-line code
+        // and terminal/optimized tiers, but promote a first-tier internal loop
+        // on its first compiled re-entry.
+        let promotion_threshold = if region.optimization == CodegenOptimization::Fast
+            && region_has_internal_back_edge(pc, region.len, &module.instructions)
+        {
+            1
+        } else {
+            TIER2_THRESHOLD
+        };
         let should_promote = {
             let count = self.tier2_counters.entry((module_idx, pc)).or_insert(0);
-            *count += 1;
-            *count >= TIER2_THRESHOLD
+            *count = count.saturating_add(1);
+            *count >= promotion_threshold
         };
         if !should_promote {
             return;
         }
 
-        let Some(region) = self.compiled_entry(module_idx, pc) else {
-            self.tier2_counters.insert((module_idx, pc), 0);
-            return;
-        };
         if region.len < 3 {
             self.tier2_counters.insert((module_idx, pc), 0);
             return;
@@ -465,6 +466,49 @@ impl JitSession {
         self.tier2_counters.clear();
     }
 
+    fn ensure_native_leaf_call(
+        &mut self,
+        module_idx: usize,
+        func_idx: usize,
+        module: &crate::bytecode::CodeModule,
+    ) -> Option<NativeLeafCall> {
+        if let Some(call) = self.native_leaf_calls.get(&(module_idx, func_idx)).copied() {
+            return Some(call);
+        }
+
+        let plan = native_leaf_plan(module, func_idx)?;
+        let symbol = format!("nulang_jit_leaf_{module_idx}_{func_idx}");
+        let native_calls = std::collections::HashMap::new();
+        let started = std::time::Instant::now();
+        let ptr = self
+            .codegen
+            .compile(NativeCompileRequest {
+                symbol: &symbol,
+                start_offset: plan.start,
+                num_instrs: plan.len,
+                instructions: &module.instructions,
+                optimization: CodegenOptimization::Fast,
+                kind: NativeCompileKind::Scalar {
+                    native_calls: &native_calls,
+                },
+            })
+            .ok()?;
+        let compile_time_ns = Self::elapsed_ns(started);
+        self.compile_stats.fast_compiles = self.compile_stats.fast_compiles.saturating_add(1);
+        self.compile_stats.fast_compile_ns = self
+            .compile_stats
+            .fast_compile_ns
+            .saturating_add(compile_time_ns);
+
+        let call = NativeLeafCall {
+            ptr,
+            return_reg: plan.return_reg,
+            required_args: plan.required_args,
+        };
+        self.native_leaf_calls.insert((module_idx, func_idx), call);
+        Some(call)
+    }
+
     /// Compile a bytecode region starting at `start_offset` with `num_instrs`
     /// instructions. Returns the compiled function pointer, or None if the
     /// region contains unsupported opcodes.
@@ -490,16 +534,14 @@ impl JitSession {
         let func_name = format!("nulang_jit_{}_{}", module_idx, start_offset);
         let started = std::time::Instant::now();
 
-        match compiler::compile_bytecode_region(
-            &mut self.baseline_module,
-            &mut self.baseline_builder_context,
-            &mut self.baseline_ctx,
-            &func_name,
+        match self.codegen.compile(NativeCompileRequest {
+            symbol: &func_name,
             start_offset,
             num_instrs,
             instructions,
-            native_calls,
-        ) {
+            optimization: CodegenOptimization::Fast,
+            kind: NativeCompileKind::Scalar { native_calls },
+        }) {
             Ok(ptr) => {
                 self.store_compiled_with_metadata(
                     module_idx,
@@ -508,6 +550,7 @@ impl JitSession {
                     num_instrs,
                     CompilationTier::Baseline,
                     CodegenOptimization::Fast,
+                    !native_calls.is_empty(),
                     Self::elapsed_ns(started),
                 );
                 Some(std::mem::transmute(ptr))
@@ -556,16 +599,14 @@ impl JitSession {
             // the scalar compiler, which handles `nulang_jit_direct_call`.
             let func_name = format!("nulang_tjit_{}_{}", module_idx, start_offset);
             let started = std::time::Instant::now();
-            if let Ok(ptr) = typed_compiler::compile_bytecode_region_typed(
-                &mut self.baseline_module,
-                &mut self.baseline_builder_context,
-                &mut self.baseline_ctx,
-                &func_name,
+            if let Ok(ptr) = self.codegen.compile(NativeCompileRequest {
+                symbol: &func_name,
                 start_offset,
                 num_instrs,
                 instructions,
-                type_metadata,
-            ) {
+                optimization: CodegenOptimization::Fast,
+                kind: NativeCompileKind::Typed { type_metadata },
+            }) {
                 self.store_compiled_with_metadata(
                     module_idx,
                     start_offset,
@@ -573,6 +614,7 @@ impl JitSession {
                     num_instrs,
                     CompilationTier::Typed,
                     CodegenOptimization::Fast,
+                    false,
                     Self::elapsed_ns(started),
                 );
                 self.typed_regions.insert((module_idx, start_offset));
@@ -600,16 +642,14 @@ impl JitSession {
     ) -> Option<JitFunctionPtr> {
         let func_name = self.next_promotion_name("nulang_jit_opt", module_idx, start_offset);
         let started = std::time::Instant::now();
-        match compiler::compile_bytecode_region(
-            &mut self.optimized_module,
-            &mut self.optimized_builder_context,
-            &mut self.optimized_ctx,
-            &func_name,
+        match self.codegen.compile(NativeCompileRequest {
+            symbol: &func_name,
             start_offset,
             num_instrs,
             instructions,
-            native_calls,
-        ) {
+            optimization: CodegenOptimization::Optimized,
+            kind: NativeCompileKind::Scalar { native_calls },
+        }) {
             Ok(ptr) => {
                 self.store_compiled_with_metadata(
                     module_idx,
@@ -618,6 +658,7 @@ impl JitSession {
                     num_instrs,
                     CompilationTier::Baseline,
                     CodegenOptimization::Optimized,
+                    !native_calls.is_empty(),
                     Self::elapsed_ns(started),
                 );
                 Some(std::mem::transmute(ptr))
@@ -640,16 +681,16 @@ impl JitSession {
 
         let func_name = self.next_promotion_name("nulang_tjit_promote", module_idx, start_offset);
         let started = std::time::Instant::now();
-        match typed_compiler::compile_bytecode_region_typed(
-            &mut self.optimized_module,
-            &mut self.optimized_builder_context,
-            &mut self.optimized_ctx,
-            &func_name,
+        match self.codegen.compile(NativeCompileRequest {
+            symbol: &func_name,
             start_offset,
             num_instrs,
             instructions,
-            Some(type_metadata),
-        ) {
+            optimization: CodegenOptimization::Optimized,
+            kind: NativeCompileKind::Typed {
+                type_metadata: Some(type_metadata),
+            },
+        }) {
             Ok(ptr) => {
                 self.store_compiled_with_metadata(
                     module_idx,
@@ -658,6 +699,7 @@ impl JitSession {
                     num_instrs,
                     CompilationTier::Typed,
                     CodegenOptimization::Optimized,
+                    false,
                     Self::elapsed_ns(started),
                 );
                 self.typed_regions.insert((module_idx, start_offset));
@@ -731,7 +773,7 @@ impl JitSession {
         type_metadata: Option<&crate::jit::typed_compiler::TypeMetadata>,
     ) -> Option<JitFunctionPtr> {
         use crate::jit::simd_analyzer::analyze_region;
-        use crate::jit::simd_compiler::{compile_simd_region, is_simd_supported};
+        use crate::jit::simd_compiler::is_simd_supported;
 
         // Check if already compiled
         if let Some(region) = self.compiled_entry(module_idx, start_offset) {
@@ -768,14 +810,16 @@ impl JitSession {
         let func_name = format!("nulang_simd_{}_{}", module_idx, start_offset);
         let started = std::time::Instant::now();
 
-        match compile_simd_region(
-            &mut self.optimized_module,
-            &mut self.optimized_builder_context,
-            &mut self.optimized_ctx,
-            &func_name,
+        match self.codegen.compile(NativeCompileRequest {
+            symbol: &func_name,
+            start_offset,
+            num_instrs,
             instructions,
-            &simd_region,
-        ) {
+            optimization: CodegenOptimization::Optimized,
+            kind: NativeCompileKind::Simd {
+                region: &simd_region,
+            },
+        }) {
             Ok(ptr) => {
                 self.store_compiled_with_metadata(
                     module_idx,
@@ -784,6 +828,7 @@ impl JitSession {
                     num_instrs,
                     CompilationTier::Simd,
                     CodegenOptimization::Optimized,
+                    false,
                     Self::elapsed_ns(started),
                 );
                 Some(std::mem::transmute(ptr))
@@ -808,7 +853,7 @@ impl JitSession {
         type_metadata: Option<&crate::jit::typed_compiler::TypeMetadata>,
     ) -> Option<JitFunctionPtr> {
         use crate::jit::simd_analyzer::analyze_region;
-        use crate::jit::simd_compiler::{compile_simd_region, is_simd_supported};
+        use crate::jit::simd_compiler::is_simd_supported;
 
         if !is_simd_supported() {
             return None;
@@ -821,14 +866,16 @@ impl JitSession {
         }
         let func_name = self.next_promotion_name("nulang_simd_promote", module_idx, start_offset);
 
-        match compile_simd_region(
-            &mut self.optimized_module,
-            &mut self.optimized_builder_context,
-            &mut self.optimized_ctx,
-            &func_name,
+        match self.codegen.compile(NativeCompileRequest {
+            symbol: &func_name,
+            start_offset,
+            num_instrs,
             instructions,
-            &simd_region,
-        ) {
+            optimization: CodegenOptimization::Optimized,
+            kind: NativeCompileKind::Simd {
+                region: &simd_region,
+            },
+        }) {
             Ok(ptr) => {
                 self.store_compiled_with_metadata(
                     module_idx,
@@ -837,6 +884,7 @@ impl JitSession {
                     num_instrs,
                     CompilationTier::Simd,
                     CodegenOptimization::Optimized,
+                    false,
                     Self::elapsed_ns(started),
                 );
                 Some(std::mem::transmute(ptr))
@@ -919,12 +967,22 @@ impl crate::backends::JitBackend for JitSession {
         self.compiled_entry(module_idx, pc).map(|region| region.len)
     }
 
+    fn compiled_region_requires_vm_reentry(&self, module_idx: usize, pc: usize) -> bool {
+        self.compiled_entry(module_idx, pc)
+            .map(|region| region.requires_vm_reentry)
+            .unwrap_or(true)
+    }
+
     fn compiled_count(&self) -> usize {
         self.compiled_count
     }
 
     fn typed_compiled_count(&self) -> usize {
         self.typed_regions.len()
+    }
+
+    fn compile_stats(&self) -> crate::backends::JitCompileStats {
+        self.compile_stats
     }
 
     fn reset_hot_counters(&mut self) {
@@ -948,6 +1006,12 @@ impl crate::backends::JitBackend for JitSession {
         }
 
         let plan = self.region_planner.plan(module_idx, pc, module);
+        if !plan.native_calls.is_empty() {
+            let callees: FxHashSet<usize> = plan.native_calls.values().copied().collect();
+            for func_idx in callees {
+                let _ = self.ensure_native_leaf_call(module_idx, func_idx, module);
+            }
+        }
         if plan.len >= 3 {
             if unsafe {
                 self.compile_region_typed(
@@ -980,10 +1044,34 @@ impl crate::backends::JitBackend for JitSession {
         regs: &mut [u64; 256],
         constants: &[u64],
     ) -> crate::backends::TieredAction {
-        let Some(func) = (unsafe { self.get_compiled(module_idx, pc) }) else {
+        let Some(region) = self.compiled_entry(module_idx, pc) else {
             return crate::backends::TieredAction::Interpret;
         };
+        let func: JitFunctionPtr = unsafe { std::mem::transmute(region.ptr) };
+
+        // Regions that cannot re-enter the VM cannot issue direct-call helpers.
+        // Preserve the pre-native-leaf hot path: no map scan, temporary Vec,
+        // or leaf-dispatch TLS install for ordinary compiled execution.
+        if !region.requires_vm_reentry {
+            func(regs.as_mut_ptr(), constants.as_ptr());
+            return crate::backends::TieredAction::RanJit;
+        }
+
+        let leaf_calls: Vec<(usize, *const u8, u8, usize)> = self
+            .native_leaf_calls
+            .iter()
+            .filter_map(|(&(leaf_module, func_idx), call)| {
+                (leaf_module == module_idx).then_some((
+                    func_idx,
+                    call.ptr,
+                    call.return_reg,
+                    call.required_args,
+                ))
+            })
+            .collect();
+        crate::jit::runtime::set_jit_leaf_calls(&leaf_calls, constants.as_ptr());
         func(regs.as_mut_ptr(), constants.as_ptr());
+        crate::jit::runtime::clear_jit_leaf_calls();
         crate::backends::TieredAction::RanJit
     }
 }
