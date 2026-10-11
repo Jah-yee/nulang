@@ -50,7 +50,12 @@ fn lookup(slots: &[Option<Slot>], id: mir::LocalId) -> NuResult<Slot> {
 }
 
 fn compile_object(mir: &mir::Module) -> NuResult<Vec<u8>> {
-    if !mir.behaviors.is_empty() || !mir.foreign_functions.is_empty() {
+    if !mir.behaviors.is_empty()
+        || !mir.actor_metadata.is_empty()
+        || !mir.compensation_of.is_empty()
+        || !mir.parallel_branches_of.is_empty()
+        || !mir.foreign_functions.is_empty()
+    {
         return Err(error("actors, workflows and FFI require the full runtime"));
     }
     let entry = mir
