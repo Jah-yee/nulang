@@ -788,6 +788,67 @@ mod tests {
     }
 
     #[test]
+    fn test_c_api_rejects_ambiguous_legacy_string_lookup_across_modules() {
+        let rt = nulang_runtime_new();
+        let a = CString::new("1 + 2").unwrap();
+        let b = CString::new("3 + 4").unwrap();
+        let module_a = unsafe { nulang_compile(rt, a.as_ptr()) };
+        let module_b = unsafe { nulang_compile(rt, b.as_ptr()) };
+        assert!(module_a >= 0 && module_b >= 0);
+
+        // Both modules allocate their first string at the same string index.
+        // Raw NulangValue bits alone cannot identify the owning module.
+        let text_a = CString::new("from module a").unwrap();
+        let text_b = CString::new("from module b").unwrap();
+        let value_a = unsafe { nulang_module_string(rt, module_a, text_a.as_ptr()) };
+        let value_b = unsafe { nulang_module_string(rt, module_b, text_b.as_ptr()) };
+        assert_eq!(value_a.raw, value_b.raw);
+
+        let legacy = unsafe { nulang_value_to_string(rt, value_a) };
+        assert!(legacy.is_null(), "legacy lookup must not silently select the last module");
+        let error = unsafe { CStr::from_ptr(nulang_last_error(rt)) }
+            .to_string_lossy()
+            .into_owned();
+        assert!(error.contains("ambiguous"), "{error}");
+
+        let ptr_a = unsafe { nulang_value_to_string_in_module(rt, module_a, value_a) };
+        assert!(!ptr_a.is_null());
+        assert_eq!(unsafe { CStr::from_ptr(ptr_a) }.to_str().unwrap(), "from module a");
+        assert!(unsafe { nulang_free_string(rt, ptr_a) });
+
+        let ptr_b = unsafe { nulang_value_to_string_in_module(rt, module_b, value_b) };
+        assert!(!ptr_b.is_null());
+        assert_eq!(unsafe { CStr::from_ptr(ptr_b) }.to_str().unwrap(), "from module b");
+        assert!(unsafe { nulang_free_string(rt, ptr_b) });
+
+        let invalid = unsafe { nulang_value_to_string_in_module(rt, -1, value_a) };
+        assert!(invalid.is_null());
+        assert!(!unsafe { nulang_last_error(rt) }.is_null());
+        unsafe { nulang_runtime_free(rt) };
+    }
+
+    #[test]
+    fn test_c_api_legacy_string_lookup_remains_valid_when_unambiguous() {
+        let rt = nulang_runtime_new();
+        let first = CString::new("7").unwrap();
+        let second = CString::new("8").unwrap();
+        let module_a = unsafe { nulang_compile(rt, first.as_ptr()) };
+        let module_b = unsafe { nulang_compile(rt, second.as_ptr()) };
+        assert!(module_a >= 0 && module_b >= 0);
+
+        let shared = CString::new("identical").unwrap();
+        let a = unsafe { nulang_module_string(rt, module_a, shared.as_ptr()) };
+        let b = unsafe { nulang_module_string(rt, module_b, shared.as_ptr()) };
+        assert_eq!(a.raw, b.raw);
+
+        let ptr = unsafe { nulang_value_to_string(rt, a) };
+        assert!(!ptr.is_null());
+        assert_eq!(unsafe { CStr::from_ptr(ptr) }.to_str().unwrap(), "identical");
+        assert!(unsafe { nulang_free_string(rt, ptr) });
+        unsafe { nulang_runtime_free(rt) };
+    }
+
+    #[test]
     fn test_c_api_value_extractors() {
         let int_val: NulangValue = Value::int(42).into();
         assert_eq!(nulang_value_int(int_val), 42);
