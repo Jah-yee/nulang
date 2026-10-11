@@ -452,6 +452,25 @@ pub fn aot_set_pending_error(msg: String) {
     });
 }
 
+#[cfg(test)]
+mod aot_error_channel_regression_tests {
+    use super::{aot_set_pending_error, aot_take_pending_error};
+
+    #[test]
+    fn preserves_first_pending_arithmetic_error() {
+        // Standalone native helpers cannot unwind; the first error is
+        // authoritative even when downstream operators encounter a nil result.
+        let _ = aot_take_pending_error();
+        aot_set_pending_error("original operand was a heap value".to_string());
+        aot_set_pending_error("secondary operand was nil".to_string());
+        assert_eq!(
+            aot_take_pending_error().as_deref(),
+            Some("original operand was a heap value")
+        );
+        assert_eq!(aot_take_pending_error(), None);
+    }
+}
+
 /// Take (and clear) the pending AOT runtime error, if any.
 pub fn aot_take_pending_error() -> Option<String> {
     AOT_PENDING_ERROR.with(|e| e.borrow_mut().take())
