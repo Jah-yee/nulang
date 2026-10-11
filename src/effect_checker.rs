@@ -579,6 +579,30 @@ impl EffectChecker {
         self.fn_rows.get(name).cloned()
     }
 
+    /// Resolve callable effects through a conditional expression as well as
+    /// direct function names and annotated lambdas. A value-returning branch
+    /// that is not proven callable must not be silently treated as pure when
+    /// invoked; callers handle that unknown case conservatively.
+    fn known_callable_expr_row(&self, expr: &Expr) -> Option<EffectRow> {
+        match expr {
+            Expr::Var(name, _) => self.known_callable_row(name),
+            Expr::Lambda {
+                effect: Some(effect),
+                ..
+            } => Some(effect.clone()),
+            Expr::If {
+                then_branch,
+                else_branch: Some(else_branch),
+                ..
+            } => {
+                let then_row = self.known_callable_expr_row(then_branch)?;
+                let else_row = self.known_callable_expr_row(else_branch)?;
+                Some(effect_row_union(&then_row, &else_row))
+            }
+            _ => None,
+        }
+    }
+
     /// Infer a body with a local alias that may carry a callable effect
     /// annotation. Keep the binding scoped even when the row is unknown.
     fn infer_with_callable_bound(
@@ -643,10 +667,16 @@ impl EffectChecker {
                 for arg in args {
                     row = effect_row_union(&row, &self.infer_effects(ctx, arg)?);
                 }
-                if let Expr::Var(name, _) = func.as_ref() {
-                    if let Some(callee_row) = self.known_callable_row(name) {
-                        row = effect_row_union(&row, &callee_row);
-                    }
+                if let Some(callee_row) = self.known_callable_expr_row(func) {
+                    row = effect_row_union(&row, &callee_row);
+                } else if matches!(func.as_ref(), Expr::If { .. }) {
+                    // A computed callable with an unproven branch cannot
+                    // discharge a closed effect budget merely because
+                    // evaluating its branch selector is pure.
+                    row = effect_row_union(
+                        &row,
+                        &EffectRow::Open(vec![], Region::fresh()),
+                    );
                 }
                 Ok(row)
             }
@@ -659,14 +689,15 @@ impl EffectChecker {
                 let val_row = self.infer_effects(ctx, value)?;
                 // Capture only statically known callable provenance. An
                 // unrelated local binding remains an explicit shadow.
-                let callable = match value.as_ref() {
-                    Expr::Var(source, _) => self.known_callable_row(source),
-                    Expr::Lambda {
-                        effect: Some(effect),
-                        ..
-                    } => Some(effect.clone()),
-                    _ => None,
-                };
+                let callable = self.known_callable_expr_row(value).or_else(|| {
+                    if matches!(value.as_ref(), Expr::If { .. }) {
+                        // Retain unknown callable provenance for computed
+                        // aliases until inference can prove a closed budget.
+                        Some(EffectRow::Open(vec![], Region::fresh()))
+                    } else {
+                        None
+                    }
+                });
                 let body_row = self.infer_with_callable_bound(ctx, name, callable, body)?;
                 Ok(effect_row_union(&val_row, &body_row))
             }
