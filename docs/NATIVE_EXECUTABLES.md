@@ -53,8 +53,9 @@ For a repeatable Linux size and stdout-parity report:
 
 ```sh
 cargo build --locked --release --no-default-features --features native-executable --bin nulang
-bash scripts/measure_native_binaries.sh ./target/release/nulang ./target/native-size-report
-cat ./target/native-size-report/report.tsv
+cargo_target="$(cargo metadata --locked --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+bash scripts/measure_native_binaries.sh "$cargo_target/release/nulang" "$cargo_target/native-size-report"
+cat "$cargo_target/native-size-report/report.tsv"
 ```
 
 The script always compares Nulang against C, and adds Go, TinyGo, and Rust
