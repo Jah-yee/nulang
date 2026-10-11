@@ -3191,9 +3191,20 @@ impl Runtime {
             let Some(actor_id) = self.claim_next_ready_actor() else {
                 break;
             };
-            self.step_actor(actor_id);
+            // Spawning an actor creates a ready token before any message is
+            // sent. Drain that bookkeeping token without counting it against
+            // the host's message budget. Likewise, a suspended actor cannot
+            // execute a new mailbox message until it resumes.
+            let has_runnable_message = self
+                .actors
+                .get(&actor_id)
+                .map(|actor| !actor.mailbox.is_empty() && actor.suspended_execution.is_none())
+                .unwrap_or(false);
+            if has_runnable_message {
+                self.step_actor(actor_id);
+                processed += 1;
+            }
             self.finish_actor_turn(actor_id);
-            processed += 1;
         }
         self.process_gc_ops();
         self.process_deferred_all();
