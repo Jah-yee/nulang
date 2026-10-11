@@ -1230,4 +1230,70 @@ mod tests {
         let (history, _rx) = realtime_subscribe(room);
         assert_eq!(history, vec!["hello"]);
     }
+
+    #[test]
+    fn static_serving_stays_inside_its_root_including_symlinks() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("nulang-web-root-{}-{nonce}", std::process::id()));
+        let public = dir.join("public");
+        std::fs::create_dir_all(&public).unwrap();
+        std::fs::write(public.join("index.html"), "public").unwrap();
+        std::fs::write(dir.join("private.txt"), "sensitive").unwrap();
+
+        assert_eq!(WebDevServer::serve_static(Some(&public), None, "/index.html").status, 200);
+        assert_eq!(WebDevServer::serve_static(Some(&public), None, "/../private.txt").status, 404);
+        assert_eq!(WebDevServer::serve_static(Some(&public), None, "/inside/../../private.txt").status, 404);
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.join("private.txt"), public.join("alias.txt")).unwrap();
+            assert_eq!(WebDevServer::serve_static(Some(&public), None, "/alias.txt").status, 404);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn realtime_room_replay_and_slow_subscribers_are_bounded() {
+        let mut registry = RealtimeRegistry::default();
+        let (_id, _history, slow) = registry.subscribe("unit:bounded").unwrap();
+        for n in 0..(MAX_REALTIME_HISTORY_MESSAGES + MAX_REALTIME_SUBSCRIBER_BACKLOG + 4) {
+            registry.broadcast("unit:bounded", &format!("event-{n}")).unwrap();
+        }
+        let room = registry.rooms.get("unit:bounded").unwrap();
+        assert_eq!(room.messages.len(), MAX_REALTIME_HISTORY_MESSAGES);
+        assert!(room.replay_bytes <= MAX_REALTIME_HISTORY_BYTES);
+        assert!(room.listeners.is_empty(), "slow client must be disconnected, not buffered forever");
+        assert!(slow.try_iter().count() <= MAX_REALTIME_SUBSCRIBER_BACKLOG);
+
+        let (_id, replay, _live) = registry.subscribe("unit:bounded").unwrap();
+        assert_eq!(replay.len(), MAX_REALTIME_HISTORY_MESSAGES);
+        assert_eq!(
+            replay.last().map(String::as_str),
+            Some(format!("event-{}", MAX_REALTIME_HISTORY_MESSAGES + MAX_REALTIME_SUBSCRIBER_BACKLOG + 3).as_str())
+        );
+        assert!(registry.broadcast("unit:bounded", &"x".repeat(MAX_REALTIME_MESSAGE_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn realtime_registry_bounds_rooms_and_subscribers() {
+        let mut registry = RealtimeRegistry::default();
+        for n in 0..MAX_REALTIME_ROOMS {
+            registry.broadcast(&format!("unit:{n}"), "initial").unwrap();
+        }
+        registry.broadcast("unit:new", "recent").unwrap();
+        assert_eq!(registry.rooms.len(), MAX_REALTIME_ROOMS);
+        assert!(!registry.rooms.contains_key("unit:0"), "oldest room without subscribers is evicted");
+
+        let mut subscriptions = Vec::new();
+        for _ in 0..MAX_REALTIME_SUBSCRIBERS_PER_ROOM {
+            let (_, _, receiver) = registry.subscribe("unit:new").unwrap();
+            subscriptions.push(receiver);
+        }
+        assert!(registry.subscribe("unit:new").is_err());
+        assert!(registry.subscribe("../unsafe").is_err());
+    }
 }
