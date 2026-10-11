@@ -8,13 +8,14 @@ This is a *single persistent actor state-machine* demonstration on the **native 
 - Linux or macOS with POSIX named pipes (`mkfifo`) and `SIGKILL`.
 - Python 3.10+ (stdlib only) to run the verification harness and SQLite baseline.
 - A full-featured `nulang` CLI binary built for your platform (for example, `target/release/nulang`). The browser playground and WASM backend do not execute this demo.
+- The checkpoint-gate implementation reads a local FIFO with `FS.read`. Nulang explicitly requires `--with=fs` for this effect; the harness passes only that capability (no broad permission grant).
 
 From the repository root:
 
 ~~~bash
 python3 -m unittest discover -s examples/durable_job -p 'test_*.py'
 python3 examples/durable_job/run_demo.py --baseline-only
-./target/release/nulang --check examples/durable_job/job.nula
+./target/release/nulang --with=fs --check examples/durable_job/job.nula
 python3 examples/durable_job/run_demo.py --nulang-bin ./target/release/nulang
 ~~~
 
