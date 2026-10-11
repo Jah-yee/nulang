@@ -256,6 +256,12 @@ jobs:
       - name: Test opt-in standalone native executable (Linux)
         run: cargo test --locked --no-default-features --features native-executable --test native_tiny_executable
 
+      - name: Build opt-in native executable compiler for size smoke
+        run: cargo build --locked --no-default-features --features native-executable --bin nulang
+
+      - name: Measure native binary size and dynamic dependencies
+        run: bash scripts/measure_native_binaries.sh target/debug/nulang target/native-size-smoke
+
       - name: Smoke test standalone Savina runner
         run: |
           output="$(cargo run --locked --no-default-features --features savina-bench --bin nulang-savina -- --benchmark ping_pong --format jsonl)"
