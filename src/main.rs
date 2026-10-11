@@ -592,6 +592,11 @@ fn main() {
         i += 1;
     }
 
+    if opts.native_opt.is_some() && opts.backend != "native" {
+        eprintln!("Error: --native-opt requires --backend native");
+        std::process::exit(1);
+    }
+
     if opts.emit_behavior_manifest.is_some() && !opts.emit_nbc {
         eprintln!("Error: --emit-behavior-manifest currently requires --emit-nbc");
         std::process::exit(1);
@@ -744,10 +749,6 @@ fn main() {
                 }
             }
         }
-    }
-    if opts.native_opt.is_some() && opts.backend != "native" {
-        eprintln!("Error: --native-opt requires --backend native");
-        std::process::exit(1);
     }
     if opts.repl {
         let mut repl = Repl::new();
