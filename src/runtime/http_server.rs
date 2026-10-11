@@ -1187,6 +1187,49 @@ mod tests {
     }
 
     #[test]
+    fn web_redirect_is_scoped_to_the_request_and_final_return_value() {
+        let request = RequestContext {
+            request: HttpRequest {
+                method: HttpMethod::Post,
+                path: "/sign".to_string(),
+                headers: vec![],
+                body: vec![],
+            },
+            params: HashMap::new(),
+        };
+        let legacy = crate::web::redirect::render_redirect_fallback("/receipt");
+
+        assert_eq!(take_web_redirect(&legacy), None);
+        with_request_context(request.clone(), || {
+            note_web_redirect("/receipt", &legacy);
+            assert_eq!(take_web_redirect("<p>Ignored redirect</p>"), None);
+            note_web_redirect("/receipt", &legacy);
+            assert_eq!(take_web_redirect(&legacy), Some("/receipt".to_string()));
+        });
+        assert_eq!(take_web_redirect(&legacy), None);
+
+        with_request_context(request, || {
+            note_web_redirect("//evil.example", &legacy);
+            assert_eq!(take_web_redirect(&legacy), None);
+        });
+    }
+
+    #[test]
+    fn web_redirect_http_response_has_real_303_and_no_body() {
+        let response = web_redirect_http_response("/receipt?ok=yes".to_string());
+        assert_eq!(response.status, 303);
+        assert!(response.body.is_empty());
+        assert!(response.headers.contains(&(
+            "Location".to_string(),
+            "/receipt?ok=yes".to_string()
+        )));
+        assert!(response.headers.contains(&(
+            "Cache-Control".to_string(),
+            "no-store".to_string()
+        )));
+    }
+
+    #[test]
     fn test_current_request_method() {
         let _ctx = with_request_context(
             RequestContext {
