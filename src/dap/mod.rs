@@ -1416,6 +1416,42 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn test_scripted_reader_holds_eof_until_terminal_signal() {
+        let (terminal_tx, terminal_rx) = std::sync::mpsc::channel();
+        let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+        let (read_tx, read_rx) = std::sync::mpsc::channel();
+        let reader_thread = std::thread::spawn(move || {
+            let mut reader = AwaitTerminatedReader {
+                bytes: std::io::Cursor::new(Vec::new()),
+                terminal_rx,
+                waiting_tx: Some(waiting_tx),
+                finished: false,
+            };
+            let mut buf = [0u8; 1];
+            read_tx.send(std::io::Read::read(&mut reader, &mut buf)).unwrap();
+        });
+
+        // An explicit handshake proves the reader reached the EOF boundary;
+        // the assertion does not depend on a particular scheduling delay.
+        waiting_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("scripted reader did not reach the EOF gate");
+        assert!(matches!(
+            read_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        terminal_tx.send(()).unwrap();
+        assert_eq!(
+            read_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("reader did not resume on termination")
+                .unwrap(),
+            0
+        );
+        reader_thread.join().unwrap();
+    }
+
+    #[test]
     fn test_terminal_event_writer_releases_eof_only_on_terminated_frame() {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut writer = TerminalEventWriter {
