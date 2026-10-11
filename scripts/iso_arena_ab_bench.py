@@ -99,11 +99,28 @@ def criterion_case(binary: pathlib.Path, target: pathlib.Path, case: str,
            "--measurement-time", str(measurement_seconds), "--noplot"]
     if cpu is not None and shutil.which("taskset"):
         cmd = ["taskset", "-c", str(cpu)] + cmd
-    run(cmd, cwd=ROOT, env=dict(os.environ, CARGO_TARGET_DIR=str(target),
-                               CARGO_TERM_COLOR="never"))
-    estimate = target / "criterion" / "actor" / "iso_arena" / case / "new" / "estimates.json"
+    # The Criterion binary is launched directly, rather than through Cargo.
+    # Give each build an explicit output home so Criterion's cargo-metadata
+    # fallback cannot place both variants' measurements in the checkout.
+    criterion_home = target / "criterion"
+    criterion_home.mkdir(parents=True, exist_ok=True)
+    estimate = criterion_home / "actor" / "iso_arena" / case / "new" / "estimates.json"
+    # Prevent a no-op/filter mismatch from silently reusing a prior sample.
+    estimate.unlink(missing_ok=True)
+    output = run(
+        cmd,
+        cwd=ROOT,
+        env=dict(os.environ, CARGO_TARGET_DIR=str(target),
+                 CRITERION_HOME=str(criterion_home), CARGO_TERM_COLOR="never"),
+    )
     if not estimate.is_file():
-        raise RuntimeError(f"Criterion did not produce {estimate}")
+        alternatives = sorted(str(p.relative_to(criterion_home))
+                              for p in criterion_home.rglob("estimates.json"))
+        raise RuntimeError(
+            f"Criterion did not produce {estimate} for {name}. "
+            f"Other estimates: {alternatives[:12]!r}. "
+            f"Benchmark stdout tail: {output[-1500:]!r}"
+        )
     return read_median_ns(estimate)
 
 
