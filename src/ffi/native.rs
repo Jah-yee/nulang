@@ -297,6 +297,30 @@ mod tests {
     }
 
     #[test]
+    fn test_registered_callback_rejects_incompatible_declared_signature() {
+        let mut registry = FfiRegistry::new();
+        let function = unsafe {
+            NativeFunction::new(
+                std::ptr::null::<c_void>(),
+                Signature::new(vec![], CType::I64),
+                None,
+                "scoped_signature_test".to_string(),
+            )
+        };
+        registry.register(function);
+
+        let err = unsafe {
+            registry.resolve_or_load(
+                "__nulang_registered__",
+                "scoped_signature_test",
+                Signature::new(vec![], CType::F64),
+            )
+        }
+        .unwrap_err();
+        assert!(err.contains("signature mismatch"), "{err}");
+    }
+
+    #[test]
     fn test_registry_register_and_lookup() {
         let mut registry = FfiRegistry::new();
         let dummy_ptr = std::ptr::null::<c_void>();
