@@ -12,7 +12,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::bytecode::CodeModule;
 use crate::value_layout::PAYLOAD_MASK;
@@ -1174,6 +1174,7 @@ impl WebDevServer {
             }
         }
 
+        let mut last_write = Instant::now();
         loop {
             if shutdown.load(Ordering::Relaxed) {
                 break;
@@ -1183,11 +1184,27 @@ impl WebDevServer {
                     if Self::write_sse_event(stream, &msg).is_err() {
                         break;
                     }
+                    last_write = Instant::now();
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // Test the TCP connection even when the room is idle.
+                    // Otherwise abandoned EventSource subscriptions can hold
+                    // room slots indefinitely without further broadcasts.
+                    if last_write.elapsed() >= Duration::from_secs(15) {
+                        if Self::write_sse_keepalive(stream).is_err() {
+                            break;
+                        }
+                        last_write = Instant::now();
+                    }
+                }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
+    }
+
+    fn write_sse_keepalive<W: Write>(stream: &mut W) -> std::io::Result<()> {
+        stream.write_all(b": keep-alive\n\n")?;
+        stream.flush()
     }
 
     fn write_sse_event(stream: &mut TcpStream, msg: &str) -> std::io::Result<()> {
