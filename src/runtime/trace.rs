@@ -91,11 +91,10 @@ impl TraceContext {
     /// Create the context for one actor-message dispatch.
     ///
     /// Existing W3C context always propagates, even when local TRACE spans are
-    /// filtered out. A message with no incoming context only starts a new root
-    /// when this runtime is actually collecting TRACE-level spans. Malformed
-    /// incoming context preserves the historical fail-soft behavior by starting
-    /// a fresh root. This keeps observability semantics intact while making the
-    /// normal untraced actor path allocation/formatting-free.
+    /// filtered out. This **diagnostic-only** control restores the historical
+    /// eager root for untraced delivery even when TRACE collection is disabled,
+    /// while preserving the optimized candidate's call-site and option shape.
+    /// Never promote this code as a tracing optimization.
     #[inline]
     pub(crate) fn for_dispatch(traceparent: Option<&str>, create_root: bool) -> Option<Self> {
         match traceparent {
@@ -103,7 +102,7 @@ impl TraceContext {
                 Self::from_traceparent(tp).map_or_else(Self::root, |incoming| incoming.child()),
             ),
             None if create_root => Some(Self::root()),
-            None => None,
+            None => Some(Self::root()),
         }
     }
 
