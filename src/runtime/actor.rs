@@ -866,7 +866,7 @@ mod tests {
     }
 
     #[test]
-    fn pooled_generated_name_reuses_storage_and_resets_actor_state() {
+    fn test_pooled_generated_name_reuses_storage_and_resets_actor_state() {
         let mut actor = Actor::new(7, "actor_00000000000000000000", 0);
         let name_ptr = actor.name.as_ptr();
         actor.set_state_field("transient", Value::int(42));
