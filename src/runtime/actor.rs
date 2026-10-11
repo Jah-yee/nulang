@@ -946,6 +946,47 @@ mod tests {
     }
 
     #[test]
+    fn disabled_flight_recorder_occupies_at_most_two_machine_words() {
+        // Millions of idle actors must not each carry an inline Vec,
+        // cursor and sequence counter for an unused debug facility.
+        assert!(
+            std::mem::size_of::<FlightRecorder>() <= 2 * std::mem::size_of::<usize>(),
+            "disabled flight-recorder metadata is too large for actor density"
+        );
+
+        let mut recorder = FlightRecorder::new(0);
+        recorder.record(7, 3, &[Value::int(42)]);
+        assert!(recorder.is_empty());
+    }
+
+    #[test]
+    fn lazy_flight_recorder_preserves_ring_order_and_clear() {
+        let mut recorder = FlightRecorder::new(2);
+        assert!(recorder.is_empty());
+        recorder.record(11, 1, &[Value::int(1)]);
+        recorder.record(12, 2, &[Value::int(2)]);
+        recorder.record(13, 3, &[Value::int(3)]);
+        let ordered = recorder.ordered_entries();
+        assert_eq!(ordered.iter().map(|entry| entry.seq).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(
+            ordered.iter().map(|entry| entry.sender).collect::<Vec<_>>(),
+            [12, 13]
+        );
+
+        let cloned = recorder.clone();
+        assert_eq!(
+            cloned.ordered_entries().iter().map(|entry| entry.seq).collect::<Vec<_>>(),
+            [1, 2]
+        );
+
+        recorder.clear();
+        assert!(recorder.is_empty());
+        recorder.record(14, 4, &[Value::int(4)]);
+        assert_eq!(recorder.entries()[0].seq, 0);
+        assert_eq!(recorder.entries()[0].sender, 14);
+    }
+
+    #[test]
     fn zero_capacity_flight_recorder_is_noop() {
         let mut recorder = FlightRecorder::new(0);
         recorder.record(7, 3, &[Value::int(42)]);
