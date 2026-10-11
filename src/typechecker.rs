@@ -5062,6 +5062,19 @@ mod tests {
     }
 
     #[test]
+    fn test_check_src_rejects_effectful_callback_in_pure_parameter() {
+        let source = r#"
+            fn only_io() -> Unit ! {IO} { perform IO.print("only io") }
+            fn accepts_pure(cb: () -> Unit ! {}) -> Unit { cb() }
+            accepts_pure(only_io)
+        "#;
+        assert!(
+            check_src(source).is_err(),
+            "an IO callback cannot satisfy a pure callback signature"
+        );
+    }
+
+    #[test]
     fn test_mgu_opaque_nominal_rejects_underlying() {
         let html = Type::Nominal {
             name: "Html".to_string(),
