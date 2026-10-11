@@ -253,3 +253,68 @@ fn extensionless_source_defaults_to_distinct_binary_name() {
     assert_eq!(run.stdout, b"extensionless\n");
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn emit_exe_rejects_eval_instead_of_executing_it() {
+    let dir = test_dir();
+    let artifact = dir.join("accidental-executable");
+    let output = Command::new(env!("CARGO_BIN_EXE_nulang"))
+        .args(["--emit-exe", "--eval", "1 + 2", "--out"])
+        .arg(&artifact)
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "--emit-exe --eval must fail closed");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--emit-exe requires"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!artifact.exists());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn emit_exe_rejects_check_instead_of_silently_typechecking() {
+    let dir = test_dir();
+    let input = dir.join("source.nula");
+    fs::write(&input, "1 + 2").unwrap();
+    let artifact = dir.join("accidental-executable");
+    let output = Command::new(env!("CARGO_BIN_EXE_nulang"))
+        .args(["--emit-exe", "--check"])
+        .arg(&input)
+        .arg("--out")
+        .arg(&artifact)
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "--emit-exe --check must fail closed");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--emit-exe requires"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!artifact.exists());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn emit_exe_rejects_precompiled_bytecode_without_running_it() {
+    let dir = test_dir();
+    let input = dir.join("source.nbc");
+    fs::write(&input, b"not-valid-bytecode").unwrap();
+    let artifact = dir.join("accidental-executable");
+    let output = Command::new(env!("CARGO_BIN_EXE_nulang"))
+        .arg("--emit-exe")
+        .arg(&input)
+        .arg("--out")
+        .arg(&artifact)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("source file"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!artifact.exists());
+    fs::remove_dir_all(dir).unwrap();
+}
