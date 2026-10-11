@@ -103,7 +103,12 @@ def criterion_case(binary: pathlib.Path, target: pathlib.Path, case: str,
     cmd = [str(binary), "--bench", name, "--sample-size", "20",
            "--warm-up-time", str(warmup_seconds),
            "--measurement-time", str(measurement_seconds), "--noplot"]
-    if cpu is not None and shutil.which("taskset"):
+    if cpu is not None:
+        if not shutil.which("taskset"):
+            raise RuntimeError(
+                "taskset is required for a pinned same-CPU comparison; "
+                "refusing to silently benchmark unpinned"
+            )
         cmd = ["taskset", "-c", str(cpu)] + cmd
     # The Criterion binary is launched directly, rather than through Cargo.
     # Give each build an explicit output home so Criterion's cargo-metadata
