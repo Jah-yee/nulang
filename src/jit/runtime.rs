@@ -448,7 +448,12 @@ thread_local! {
 /// for the tiered JIT, which never inspects this slot).
 pub fn aot_set_pending_error(msg: String) {
     AOT_PENDING_ERROR.with(|e| {
-        *e.borrow_mut() = Some(msg);
+        // A failing native helper returns nil because it cannot unwind.
+        // Preserve the original error if a later helper sees that nil.
+        let mut pending = e.borrow_mut();
+        if pending.is_none() {
+            *pending = Some(msg);
+        }
     });
 }
 
