@@ -5065,6 +5065,50 @@ mod tests {
     }
 
     #[test]
+    fn test_mgu_rejects_unrelated_open_effect_tail_variables() {
+        let fn_with = |tail: Region| Type::Function {
+            param: Box::new(Type::unit()),
+            ret: Box::new(Type::unit()),
+            effect: EffectRow::Open(vec![Effect::IO], tail),
+            cap: Capability::Ref,
+        };
+        let left_tail = Region::fresh();
+        let right_tail = Region::fresh();
+        assert!(mgu(&fn_with(left_tail), &fn_with(right_tail), sp()).is_err());
+        assert!(mgu(&fn_with(left_tail), &fn_with(left_tail), sp()).is_ok());
+    }
+
+    #[test]
+    fn test_mgu_assignable_rejects_unknown_effect_tail_in_pure_callback() {
+        let callback = |effects| Type::Function {
+            param: Box::new(Type::unit()),
+            ret: Box::new(Type::unit()),
+            effect: effects,
+            cap: Capability::Ref,
+        };
+        let actual = callback(EffectRow::Open(vec![Effect::IO], Region::fresh()));
+        let pure_expected = callback(EffectRow::empty());
+        assert!(mgu_assignable(&actual, &pure_expected, sp()).is_err());
+
+        let pure_actual = callback(EffectRow::empty());
+        let open_expected = callback(EffectRow::Open(vec![Effect::IO], Region::fresh()));
+        assert!(mgu_assignable(&pure_actual, &open_expected, sp()).is_ok());
+    }
+
+    #[test]
+    fn test_check_src_rejects_open_callback_passed_to_pure_parameter() {
+        let source = r#"
+            fn invokes_open(cb: () -> Unit ! {IO, | row}) -> Unit { cb() }
+            fn requires_pure(cb: () -> Unit ! {}) -> Unit { cb() }
+            requires_pure(invokes_open)
+        "#;
+        assert!(
+            check_src(source).is_err(),
+            "open callback effects cannot be discarded at a pure function boundary"
+        );
+    }
+
+    #[test]
     fn test_mgu_opaque_nominal_rejects_underlying() {
         let html = Type::Nominal {
             name: "Html".to_string(),
