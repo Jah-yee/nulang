@@ -11,13 +11,14 @@
 //! [`TraceContext`] is a small (Copy) value: a 128-bit trace id plus the
 //! current span id, its parent span id, and the W3C sampled flag. It
 //! serializes to a standard `traceparent` string (`00-<32 hex>-<16 hex>-<flags>`)
-//! so any W3C-compliant collector can reconstruct the hierarchy.
+//! to preserve causal lineage across process and node boundaries.
 //!
-//! The default (non-OTel) build records each handled message as a
-//! `tracing` span carrying `trace_id` / `span_id` / `parent_span_id` as
-//! structured fields — zero work when no `tracing` subscriber is attached.
-//! The optional `otel` feature can bridge those fields into real OTLP spans
-//! via `tracing-opentelemetry`.
+//! Without OpenTelemetry, each handled message records a `tracing` span
+//! carrying logical `trace_id`, `span_id`, and `parent_span_id` fields,
+//! with no span overhead when the subscriber filters TRACE.
+//! With the optional `otel` feature, the W3C parent is installed as a real
+//! remote OpenTelemetry context and outgoing messages use the actual SDK
+//! span ID, not only text attributes.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
