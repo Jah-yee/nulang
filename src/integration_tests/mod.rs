@@ -8735,6 +8735,11 @@ match { a: 2, b: 9 } with {
     fn test_workflow_signal_resume_failed_terminal_append_quarantines_actor() {
         let source = r#"
             workflow SignalResumeFails {
+                step prepare {
+                    self.step_index = self.step_index + 1
+                } compensate {
+                    self.comp_order = 1
+                }
                 step fail_step {
                     {
                         perform Signal.wait("go")
@@ -8762,6 +8767,14 @@ match { a: 2, b: 9 } with {
         let actor_id = value.as_actor_id().expect("spawn should return actor ref");
         rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
         rt.borrow_mut().run_scheduler();
+        assert!(
+            backing.read_workflow_events(actor_id).iter().any(|event| {
+                matches!(event, WorkflowEvent::StepCompleted { step_name, .. } if step_name == "prepare")
+            }),
+            "the compensatable prepare step must be durably completed first"
+        );
+        rt.borrow_mut().send_message_by_id(actor_id, 1, &[]);
+        rt.borrow_mut().run_scheduler();
         assert_eq!(
             rt.borrow().actors.get(&actor_id).unwrap().waiting_signal.as_deref(),
             Some("go"),
@@ -8778,10 +8791,16 @@ match { a: 2, b: 9 } with {
             }),
             "rejected StepFailed must not appear in committed history"
         );
+        assert!(
+            !backing.read_workflow_events(actor_id).iter().any(|event| {
+                matches!(event, WorkflowEvent::SagaCompensated { .. })
+            }),
+            "rejected StepFailed must not trigger compensation"
+        );
         assert_eq!(
             backing.load_snapshot(actor_id).unwrap().state.get("step_index"),
-            Some(&crate::runtime::PersistedValue::Int(0)),
-            "terminal failure must preserve last safe step"
+            Some(&crate::runtime::PersistedValue::Int(1)),
+            "terminal failure must preserve the completed prepare step"
         );
         assert!(
             backing.load_snapshot(actor_id).unwrap().state.get("answer").is_none(),
