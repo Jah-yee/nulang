@@ -36,7 +36,7 @@ GROUP = "actor/cross_shard_enqueue_by_id"
 
 def bench_command() -> list[str]:
     return [
-        "cargo", "bench", "--locked", "--bench", "actor_bench",
+        "cargo", "bench", "--locked", "--bench", "bench_main",
         "--no-default-features", "--features", "native-codegen",
         "--", GROUP, "--noplot", "--color", "never",
         "--sample-size", "15", "--warm-up-time", "0.5",
@@ -46,7 +46,7 @@ def bench_command() -> list[str]:
 
 def build_command() -> list[str]:
     return [
-        "cargo", "bench", "--locked", "--bench", "actor_bench",
+        "cargo", "bench", "--locked", "--bench", "bench_main",
         "--no-default-features", "--features", "native-codegen", "--no-run",
     ]
 
