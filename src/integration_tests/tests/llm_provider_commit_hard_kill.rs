@@ -169,7 +169,6 @@ fn child_provider_commits_while_compiled_workflow_is_suspended() {
     }
 }
 
-
 #[test]
 fn child_terminal_checkpoint_after_compiled_inference() {
     let Ok(directory) = std::env::var(TERMINAL_DIR_ENV) else {
@@ -213,7 +212,10 @@ fn child_terminal_checkpoint_after_compiled_inference() {
             "the committed checkpoint must contain the completed step"
         );
         assert_eq!(
-            current.persistence.read_workflow_events(actor_id).iter()
+            current
+                .persistence
+                .read_workflow_events(actor_id)
+                .iter()
                 .filter(|event| matches!(event, WorkflowEvent::StepCompleted { .. }))
                 .count(),
             1,
@@ -366,7 +368,6 @@ fn compiled_inference_provider_commit_receipt_loss_deduplicates_on_recovery() {
     fs::remove_dir_all(directory).expect("remove isolated provider/SQLite state");
 }
 
-
 #[test]
 fn compiled_inference_after_terminal_checkpoint_does_not_redispatch() {
     let nonce = SystemTime::now()
@@ -427,7 +428,10 @@ fn compiled_inference_after_terminal_checkpoint_does_not_redispatch() {
             Some(RESULT)
         );
         assert_eq!(
-            recovered.persistence.read_workflow_events(actor_id).iter()
+            recovered
+                .persistence
+                .read_workflow_events(actor_id)
+                .iter()
                 .filter(|event| matches!(
                     event,
                     WorkflowEvent::StepCompleted { step_name, .. } if step_name == "ask_step"
