@@ -9042,7 +9042,6 @@ fn confirmed_node_removal_forgets_crdt_receiver_knowledge() {
     );
 }
 
- 
 /// Reject only durable saga receipts so the test can distinguish a completed
 /// compensation body from acknowledgement in the persistence layer.
 struct RejectSagaReceiptStore {
@@ -9117,9 +9116,10 @@ fn saga_receipt_rejection_quarantines_actor_before_marking_compensated() {
         "a failed durable receipt must quarantine an otherwise runnable actor"
     );
     assert!(
-        !rt.persistence.read_workflow_events(actor_id).iter().any(|event| {
-            matches!(event, WorkflowEvent::SagaCompensated { .. })
-        }),
+        !rt.persistence
+            .read_workflow_events(actor_id)
+            .iter()
+            .any(|event| { matches!(event, WorkflowEvent::SagaCompensated { .. }) }),
         "failed receipt cannot masquerade as persisted compensation"
     );
     assert_eq!(
