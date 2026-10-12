@@ -104,7 +104,9 @@ fn sigkill_of_compiled_inference_workflow_recovers_without_losing_step() {
 
     let mut child = Command::new(std::env::current_exe().expect("test binary"))
         .arg("--exact")
-        .arg("integration_tests::tests::llm_hard_kill::child_compiled_llm_suspended_before_response")
+        .arg(
+            "integration_tests::tests::llm_hard_kill::child_compiled_llm_suspended_before_response",
+        )
         .arg("--nocapture")
         .env(CHILD_DIR, &directory)
         .stdout(Stdio::piped())
@@ -154,8 +156,7 @@ fn sigkill_of_compiled_inference_workflow_recovers_without_losing_step() {
     let rt = Rc::new(RefCell::new(Runtime::new()));
     rt.borrow_mut().persistence = Box::new(LibsqlStore::new(&db_path).expect("reopen SQLite"));
     let provider = nulang_ai::MockLlmClient::text("recovered-response");
-    rt.borrow_mut()
-        .set_llm_client(Box::new(provider.clone()));
+    rt.borrow_mut().set_llm_client(Box::new(provider.clone()));
     rt.borrow_mut().register_recovery_module(
         actor_id,
         module.clone(),
@@ -185,15 +186,14 @@ fn sigkill_of_compiled_inference_workflow_recovers_without_losing_step() {
             .persistence
             .read_workflow_events(actor_id)
             .iter()
-            .filter(|event| matches!(
-                event,
-                WorkflowEvent::StepCompleted { step_name, .. } if step_name == "ask_step"
-            ))
+            .filter(|event| {
+                matches!(
+                    event,
+                    WorkflowEvent::StepCompleted { step_name, .. } if step_name == "ask_step"
+                )
+            })
             .count();
-        assert_eq!(
-            completions, 1,
-            "terminal step must appear once in SQLite"
-        );
+        assert_eq!(completions, 1, "terminal step must appear once in SQLite");
     }
 
     let calls = provider.recorded_calls();

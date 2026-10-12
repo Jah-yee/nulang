@@ -114,9 +114,8 @@ fn child_provider_commits_while_compiled_workflow_is_suspended() {
     let directory = PathBuf::from(directory);
     let (module, _) = compile_source(SOURCE).expect("compile actual workflow bytecode");
     let rt = Rc::new(RefCell::new(Runtime::new()));
-    rt.borrow_mut().persistence = Box::new(
-        LibsqlStore::new(directory.join("actor.db")).expect("open SQLite store"),
-    );
+    rt.borrow_mut().persistence =
+        Box::new(LibsqlStore::new(directory.join("actor.db")).expect("open SQLite store"));
 
     let reference = {
         let mut vm = VM::new();
@@ -145,7 +144,9 @@ fn child_provider_commits_while_compiled_workflow_is_suspended() {
         assert!(actor.suspended_execution.is_some());
         assert!(actor.llm_inflight);
         assert_eq!(
-            actor.get_state_field("step_index").and_then(|value| value.as_int()),
+            actor
+                .get_state_field("step_index")
+                .and_then(|value| value.as_int()),
             Some(0)
         );
         let snapshot = current
@@ -177,9 +178,8 @@ fn child_terminal_checkpoint_after_compiled_inference() {
     let directory = PathBuf::from(directory);
     let (module, _) = compile_source(SOURCE).expect("compile actual workflow bytecode");
     let rt = Rc::new(RefCell::new(Runtime::new()));
-    rt.borrow_mut().persistence = Box::new(
-        LibsqlStore::new(directory.join("actor.db")).expect("open SQLite store"),
-    );
+    rt.borrow_mut().persistence =
+        Box::new(LibsqlStore::new(directory.join("actor.db")).expect("open SQLite store"));
 
     let reference = {
         let mut vm = VM::new();
@@ -189,8 +189,7 @@ fn child_terminal_checkpoint_after_compiled_inference() {
     };
     let actor_id = reference.as_actor_id().expect("actor id");
     let provider = LedgerProvider::new(directory.clone(), false, actor_id);
-    rt.borrow_mut()
-        .set_llm_client(Box::new(provider.clone()));
+    rt.borrow_mut().set_llm_client(Box::new(provider.clone()));
     rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
     rt.borrow_mut().run_scheduler();
 
@@ -198,7 +197,9 @@ fn child_terminal_checkpoint_after_compiled_inference() {
         let current = rt.borrow();
         let actor = current.actors.get(&actor_id).expect("completed actor");
         assert_eq!(
-            actor.get_state_field("step_index").and_then(|value| value.as_int()),
+            actor
+                .get_state_field("step_index")
+                .and_then(|value| value.as_int()),
             Some(1),
             "step must finish before child announces persisted checkpoint"
         );
@@ -294,7 +295,10 @@ fn compiled_inference_provider_commit_receipt_loss_deduplicates_on_recovery() {
     );
 
     let (module, _) = compile_source(SOURCE).expect("recompile recovery bytecode");
-    let meta = module.actor_metadata.first().expect("workflow actor metadata");
+    let meta = module
+        .actor_metadata
+        .first()
+        .expect("workflow actor metadata");
     let mut offsets = vec![0; module.behaviors.len()];
     for &index in &meta.behavior_indices {
         if let Some(behavior) = module.behaviors.get(index) {
@@ -327,7 +331,9 @@ fn compiled_inference_provider_commit_receipt_loss_deduplicates_on_recovery() {
         let recovered = runtime.borrow();
         let actor = recovered.actors.get(&actor_id).expect("recovered workflow");
         assert_eq!(
-            actor.get_state_field("step_index").and_then(|value| value.as_int()),
+            actor
+                .get_state_field("step_index")
+                .and_then(|value| value.as_int()),
             Some(1)
         );
         assert_eq!(
@@ -338,10 +344,12 @@ fn compiled_inference_provider_commit_receipt_loss_deduplicates_on_recovery() {
             .persistence
             .read_workflow_events(actor_id)
             .iter()
-            .filter(|event| matches!(
-                event,
-                WorkflowEvent::StepCompleted { step_name, .. } if step_name == "ask_step"
-            ))
+            .filter(|event| {
+                matches!(
+                    event,
+                    WorkflowEvent::StepCompleted { step_name, .. } if step_name == "ask_step"
+                )
+            })
             .count();
         assert_eq!(completions, 1, "terminal workflow event must occur once");
     }
@@ -362,7 +370,10 @@ fn compiled_inference_provider_commit_receipt_loss_deduplicates_on_recovery() {
         .filter_map(Result::ok)
         .filter(|entry| entry.file_name().to_string_lossy().ends_with(".receipt"))
         .count();
-    assert_eq!(provider_receipts, 1, "only one provider mutation may commit");
+    assert_eq!(
+        provider_receipts, 1,
+        "only one provider mutation may commit"
+    );
 
     drop(runtime);
     fs::remove_dir_all(directory).expect("remove isolated provider/SQLite state");
@@ -387,7 +398,10 @@ fn compiled_inference_after_terminal_checkpoint_does_not_redispatch() {
     );
 
     let (module, _) = compile_source(SOURCE).expect("recompile recovery bytecode");
-    let meta = module.actor_metadata.first().expect("workflow actor metadata");
+    let meta = module
+        .actor_metadata
+        .first()
+        .expect("workflow actor metadata");
     let mut offsets = vec![0; module.behaviors.len()];
     for &index in &meta.behavior_indices {
         if let Some(behavior) = module.behaviors.get(index) {
@@ -420,7 +434,9 @@ fn compiled_inference_after_terminal_checkpoint_does_not_redispatch() {
         let recovered = runtime.borrow();
         let actor = recovered.actors.get(&actor_id).expect("recovered workflow");
         assert_eq!(
-            actor.get_state_field("step_index").and_then(|value| value.as_int()),
+            actor
+                .get_state_field("step_index")
+                .and_then(|value| value.as_int()),
             Some(1)
         );
         assert_eq!(
