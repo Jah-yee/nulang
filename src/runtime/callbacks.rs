@@ -281,23 +281,14 @@ fn perform_authorized_cli_builtin(
 ) -> Option<crate::vm::Value> {
     use crate::vm::Value;
 
+    // Reuse the VM callback's allocation contract (including pointer value
+    // provenance and current actor/main heap ownership), rather than
+    // duplicating unsafe pointer construction here.
     fn allocate_string(
         callbacks: &mut dyn crate::vm::ActorVmCallbacks,
         text: &str,
     ) -> Value {
-        let Some(ptr) = callbacks.alloc(
-            text.len() + 1,
-            crate::runtime::heap::TypeTag::String,
-        ) else {
-            return Value::nil();
-        };
-        // SAFETY: callback allocation owns at least text.len() + 1 bytes.
-        // The Nulang heap string representation is NUL-terminated.
-        unsafe {
-            std::ptr::copy_nonoverlapping(text.as_ptr(), ptr, text.len());
-            *ptr.add(text.len()) = 0;
-            Value::ptr(ptr)
-        }
+        callbacks.alloc_string(text)
     }
 
     match (effect_name, op_name) {
@@ -3183,6 +3174,92 @@ mod host_authority_tests {
                 .is_none(),
             "unknown host operations must remain unhandled"
         );
+    }
+
+    #[test]
+    fn actor_environment_and_arguments_require_exact_grants() {
+        use crate::vm::ActorVmCallbacks;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let actor_id = 800_103;
+        let runtime = Rc::new(RefCell::new(Runtime::new()));
+        {
+            let mut rt = runtime.borrow_mut();
+            rt.actors
+                .insert(actor_id, Actor::new(actor_id, "env-argument-authority", 8));
+            rt.current_actor = Some(actor_id);
+        }
+
+        let mut env_module = crate::bytecode::CodeModule::new("actor-env");
+        env_module.add_constant(Constant::String("PATH".into()));
+        let arg_module = crate::bytecode::CodeModule::new("actor-arg");
+        let mut callbacks = super::RuntimeVmCallbacks::new(runtime.clone());
+
+        let denied_env = callbacks
+            .perform_builtin_effect_in_module(
+                "Env",
+                Some("get"),
+                &env_module,
+                &[Value::string(0)],
+            )
+            .expect("unauthorized Env.get must be handled");
+        assert!(denied_env.is_nil());
+
+        let denied_arg = callbacks
+            .perform_builtin_effect_in_module(
+                "System",
+                Some("arg"),
+                &arg_module,
+                &[Value::int(0)],
+            )
+            .expect("unauthorized System.arg must be handled");
+        assert!(denied_arg.is_nil());
+
+        let manifest =
+            AuthorityManifest::from_tokens(["Env::Read(PATH)", "System::Arg(0)"]).unwrap();
+        runtime
+            .borrow_mut()
+            .actors
+            .get_mut(&actor_id)
+            .unwrap()
+            .install_authority_manifest(&manifest);
+
+        let allowed_env = callbacks
+            .perform_builtin_effect_in_module(
+                "Env",
+                Some("get"),
+                &env_module,
+                &[Value::string(0)],
+            )
+            .expect("authorized Env.get must be dispatched");
+        assert_eq!(
+            crate::vm::resolve_value_string(&env_module.constants, allowed_env),
+            std::env::var("PATH").unwrap()
+        );
+
+        let allowed_arg = callbacks
+            .perform_builtin_effect_in_module(
+                "System",
+                Some("arg"),
+                &arg_module,
+                &[Value::int(0)],
+            )
+            .expect("authorized System.arg must be dispatched");
+        assert_eq!(
+            crate::vm::resolve_value_string(&arg_module.constants, allowed_arg),
+            std::env::args().next().unwrap()
+        );
+
+        let other_arg = callbacks
+            .perform_builtin_effect_in_module(
+                "System",
+                Some("arg"),
+                &arg_module,
+                &[Value::int(1)],
+            )
+            .expect("unauthorized argument index must be denied");
+        assert!(other_arg.is_nil());
     }
 
     #[test]
