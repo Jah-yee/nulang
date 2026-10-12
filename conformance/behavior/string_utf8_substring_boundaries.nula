@@ -11,6 +11,7 @@ fn main() {
     perform IO.print("trail_cut=" + show(perform String.substring("é", 1, 1)))
     perform IO.print("emoji_cut=" + show(perform String.substring("💡", 0, 2)))
     perform IO.print("clamped=" + show(perform String.substring("hé", 1, 100)))
+    perform IO.print("overflow_clamped=" + show(perform String.substring("abc", 1, 9223372036854775807)))
     perform IO.print("empty=" + show(perform String.substring("hé", 3, 0)))
     perform IO.print("negative=" + show(perform String.substring("hi", -1, 1)))
 }
