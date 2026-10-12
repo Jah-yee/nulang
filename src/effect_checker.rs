@@ -673,10 +673,7 @@ impl EffectChecker {
                     // A computed callable with an unproven branch cannot
                     // discharge a closed effect budget merely because
                     // evaluating its branch selector is pure.
-                    row = effect_row_union(
-                        &row,
-                        &EffectRow::Open(vec![], Region::fresh()),
-                    );
+                    row = effect_row_union(&row, &EffectRow::Open(vec![], Region::fresh()));
                 }
                 Ok(row)
             }
@@ -5055,7 +5052,9 @@ mod tests {
         };
         let mut checker = EffectChecker::new();
         assert!(
-            checker.infer_effects(&EffectContext::empty(), &lambda).is_err(),
+            checker
+                .infer_effects(&EffectContext::empty(), &lambda)
+                .is_err(),
             "binding and invoking an IO callback alias must not bypass purity"
         );
     }
@@ -5100,16 +5099,17 @@ mod tests {
         };
         let mut checker = EffectChecker::new();
         assert!(
-            checker.infer_effects(&EffectContext::empty(), &lambda).is_err(),
+            checker
+                .infer_effects(&EffectContext::empty(), &lambda)
+                .is_err(),
             "transitive local aliases must keep the callback's effect"
         );
     }
 
     #[test]
     fn test_actor_behavior_callback_parameter_respects_effect_contract() {
-        let mut ast = parse_module(
-            "actor Counter { state count = 0 behavior get() { self.count } }",
-        );
+        let mut ast =
+            parse_module("actor Counter { state count = 0 behavior get() { self.count } }");
         let Decl::Actor { behaviors, .. } = &mut ast.decls[0] else {
             panic!("expected actor declaration");
         };
@@ -5173,7 +5173,9 @@ mod tests {
         };
         let mut checker = EffectChecker::new();
         assert!(
-            checker.infer_effects(&EffectContext::empty(), &lambda).is_err(),
+            checker
+                .infer_effects(&EffectContext::empty(), &lambda)
+                .is_err(),
             "calling a conditional IO callback must not bypass purity"
         );
     }
@@ -5217,7 +5219,9 @@ mod tests {
         };
         let mut checker = EffectChecker::new();
         assert!(
-            checker.infer_effects(&EffectContext::empty(), &lambda).is_err(),
+            checker
+                .infer_effects(&EffectContext::empty(), &lambda)
+                .is_err(),
             "a computed alias must retain known callback effects"
         );
     }
@@ -5252,7 +5256,9 @@ mod tests {
         };
         let mut checker = EffectChecker::new();
         assert!(
-            checker.infer_effects(&EffectContext::empty(), &lambda).is_ok(),
+            checker
+                .infer_effects(&EffectContext::empty(), &lambda)
+                .is_ok(),
             "a known-pure conditional callback must remain valid"
         );
     }
