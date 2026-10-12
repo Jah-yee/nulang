@@ -3054,4 +3054,113 @@ mod host_authority_tests {
             authorize_actor_host_effect(&rt, None, "FS", Some("read"), &constants, &regs,).is_ok()
         );
     }
+
+    #[test]
+    fn actor_backed_main_handles_environment_and_argument_effects() {
+        use crate::vm::ActorVmCallbacks;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let expected_path = std::env::var("PATH").expect("test runner needs PATH");
+        let expected_arg0 = std::env::args().next().expect("test runner has argv0");
+        let runtime = Rc::new(RefCell::new(Runtime::new()));
+        let mut callbacks = super::RuntimeVmCallbacks::new(runtime);
+
+        let mut env_module = crate::bytecode::CodeModule::new("host-env");
+        env_module.add_constant(Constant::String("PATH".into()));
+        let env_result = callbacks
+            .perform_builtin_effect_in_module(
+                "Env",
+                Some("get"),
+                &env_module,
+                &[Value::string(0)],
+            )
+            .expect("actor-backed main must handle Env.get");
+        assert_eq!(
+            crate::vm::resolve_value_string(&env_module.constants, env_result),
+            expected_path
+        );
+
+        let arg_module = crate::bytecode::CodeModule::new("host-argv");
+        let arg_result = callbacks
+            .perform_builtin_effect_in_module(
+                "System",
+                Some("arg"),
+                &arg_module,
+                &[Value::int(0)],
+            )
+            .expect("actor-backed main must handle System.arg");
+        assert_eq!(crate::vm::resolve_value_string(&[], arg_result), expected_arg0);
+
+        assert!(
+            callbacks
+                .perform_builtin_effect_in_module("Env", Some("unknown"), &env_module, &[])
+                .is_none(),
+            "unknown host operations must remain unhandled"
+        );
+    }
+
+    #[test]
+    fn actor_backed_file_read_requires_exact_grant_and_returns_file_contents() {
+        use crate::vm::ActorVmCallbacks;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let filename = format!(
+            "nulang-actor-fs-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(filename);
+        std::fs::write(&path, "actor-readable-data").unwrap();
+        let filename = path.to_string_lossy().into_owned();
+
+        let actor_id = 800_101;
+        let runtime = Rc::new(RefCell::new(Runtime::new()));
+        {
+            let mut rt = runtime.borrow_mut();
+            rt.actors.insert(actor_id, Actor::new(actor_id, "fs-read", 8));
+            rt.current_actor = Some(actor_id);
+        }
+        let mut module = crate::bytecode::CodeModule::new("host-file");
+        module.add_constant(Constant::String(filename.clone()));
+        let mut callbacks = super::RuntimeVmCallbacks::new(runtime.clone());
+
+        let denied = callbacks
+            .perform_builtin_effect_in_module(
+                "FS",
+                Some("read"),
+                &module,
+                &[Value::string(0)],
+            )
+            .expect("denied operation must be handled");
+        assert!(denied.is_nil(), "missing authority must fail closed");
+
+        {
+            let grant = format!("Fs::Read({filename})");
+            let manifest = AuthorityManifest::from_tokens([grant.as_str()]).unwrap();
+            runtime
+                .borrow_mut()
+                .actors
+                .get_mut(&actor_id)
+                .unwrap()
+                .install_authority_manifest(&manifest);
+        }
+        let allowed = callbacks
+            .perform_builtin_effect_in_module(
+                "FS",
+                Some("read"),
+                &module,
+                &[Value::string(0)],
+            )
+            .expect("authorized FS.read must be dispatched");
+        assert_eq!(
+            crate::vm::resolve_value_string(&module.constants, allowed),
+            "actor-readable-data"
+        );
+        std::fs::remove_file(path).unwrap();
+    }
 }
