@@ -139,11 +139,48 @@ fn diagnostic_from_single(err: &NuError) -> JsonDiagnostic {
         message: json_message(err),
         span: err.primary_span().and_then(json_span),
         notes: crate::diagnostic::diagnostic_notes(err),
-        suggestion: err.suggestion().map(|msg| JsonSuggestion {
-            message: msg.to_string(),
-            replacement: None,
-        }),
+        suggestion: machine_identifier_replacement(err)
+            .map(|replacement| JsonSuggestion {
+                message: format!("Replace misspelled identifier with '{replacement}'"),
+                replacement: Some(replacement),
+            })
+            .or_else(|| {
+                err.suggestion().map(|msg| JsonSuggestion {
+                    message: msg.to_string(),
+                    replacement: None,
+                })
+            }),
     }
+}
+
+/// An unambiguous spelling suggestion is machine-applicable only when the
+/// compiler's source span covers precisely the unknown identifier. We refuse
+/// all other edits; a free-text hint is not sufficient evidence for a fix.
+fn machine_identifier_replacement(err: &NuError) -> Option<String> {
+    let NuError::TypeError {
+        msg,
+        span,
+        similar_names: Some(candidates),
+        ..
+    } = err
+    else {
+        return None;
+    };
+
+    let missing = msg
+        .strip_prefix("Unbound variable: '")?
+        .strip_suffix('\\'')?;
+    let [replacement] = candidates.as_slice() else {
+        return None;
+    };
+    if replacement.is_empty() || replacement == missing {
+        return None;
+    }
+    let source = current_source_text()?;
+    if source.get(span.start as usize..span.end as usize)? != missing {
+        return None;
+    }
+    Some(replacement.clone())
 }
 
 /// The core message without position prefixes or structured-field suffixes.
