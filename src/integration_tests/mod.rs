@@ -8612,7 +8612,9 @@ match { a: 2, b: 9 } with {
         let actor_id = value.as_actor_id().expect("spawn should return actor ref");
         rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
         rt.borrow_mut().run_scheduler();
-        let safe = backing.load_snapshot(actor_id).expect("completed prepare snapshot");
+        let safe = backing
+            .load_snapshot(actor_id)
+            .expect("completed prepare snapshot");
         assert_eq!(
             safe.state.get("step_index"),
             Some(&crate::runtime::PersistedValue::Int(1))
@@ -8621,22 +8623,31 @@ match { a: 2, b: 9 } with {
         rt.borrow_mut().send_message_by_id(actor_id, 1, &[]);
         rt.borrow_mut().run_scheduler();
         assert!(
-            backing.read_workflow_events(actor_id).iter().any(|event| {
-                matches!(event, WorkflowEvent::StepFailed { step_name, .. } if step_name == "fail_step")
-            }),
+            backing
+                .read_workflow_events(actor_id)
+                .iter()
+                .any(|event| {
+                    matches!(event, WorkflowEvent::StepFailed { step_name, .. } if step_name == "fail_step")
+                }),
             "StepFailed must be durably recorded even if the runtime quarantines speculative state"
         );
-        let stored = backing.load_snapshot(actor_id).expect("failed terminal safe snapshot");
+        let stored = backing
+            .load_snapshot(actor_id)
+            .expect("failed terminal safe snapshot");
         assert!(stored.sequence > safe.sequence);
-        assert_eq!(stored.state, safe.state, "a failed VM step must not commit its mutated state");
+        assert_eq!(
+            stored.state, safe.state,
+            "a failed VM step must not commit its mutated state"
+        );
         assert!(
             !rt.borrow().actors.contains_key(&actor_id),
             "an actor with speculative failed-step mutations needs replay/rollback before dispatch"
         );
         assert!(
-            !backing.read_workflow_events(actor_id).iter().any(|event| {
-                matches!(event, WorkflowEvent::SagaCompensated { .. })
-            }),
+            !backing
+                .read_workflow_events(actor_id)
+                .iter()
+                .any(|event| { matches!(event, WorkflowEvent::SagaCompensated { .. }) }),
             "do not run saga compensation on speculative in-memory actor state"
         );
     }
