@@ -201,7 +201,7 @@ pub struct OrcaGc {
     foreign_ref_queue: Vec<ForeignRefOp>,
     /// Foreign references this actor has **received** and still holds.
     /// Each entry is `(owning actor id, header of the held object)`.
-    /// Every hold keeps the object's `foreign_count` elevated by one, so
+    /// Each distinct hold keeps the object's `foreign_count` elevated by one, so
     /// the object (and, if the owner has exited, its retired heap) stays
     /// alive until the runtime releases the hold when this actor exits.
     held_foreign_refs: HashSet<(u64, *mut OrcaHeader)>,
@@ -435,15 +435,16 @@ impl OrcaGc {
     /// Record that this actor (the receiver) holds a foreign reference to
     /// the object with header `object_header` owned by `owner_actor`.
     ///
-    /// The matching `foreign_count` increment must already have happened
-    /// (via the owner's [`inc_foreign_hold`](Self::inc_foreign_hold) or a
-    /// direct header bump for a retired owner heap).  Holds are released
-    /// by the runtime when this actor exits.
+    /// Returns true only when the (owner, object) pair is new. The runtime
+    /// increments `foreign_count` once for a new hold in the same scheduler
+    /// turn, before processing any in-flight send decrements. Duplicate
+    /// deliveries reuse the existing actor-lifetime hold and do not need
+    /// additional increments. The hold is released when this actor exits.
     pub fn record_held_ref(&mut self, owner_actor: u64, object_header: *mut OrcaHeader) -> bool {
         self.held_foreign_refs.insert((owner_actor, object_header))
     }
 
-    /// Drain the list of foreign references this actor holds.
+    /// Drain the set of distinct foreign references this actor holds.
     ///
     /// The runtime calls this when the actor exits and applies a `-1`
     /// foreign-count decrement for each entry on the owning side.  Draining
