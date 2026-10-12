@@ -7836,6 +7836,60 @@ fn test_object_ref_released_on_actor_exit() {
 }
 
 #[test]
+fn test_cross_shard_drain_reuses_staging_allocation_and_preserves_fifo() {
+    let mut shards = Runtime::new_sharded(2);
+    let mut target = shards[1].spawn_actor(Box::new(|| vec![]));
+    while target % 2 != 1 {
+        target = shards[1].spawn_actor(Box::new(|| vec![]));
+    }
+    declare_test_behavior(&mut shards[1], target, "handle");
+
+    let mut allocation = std::ptr::null();
+    let mut capacity = 0;
+    for batch in 0..3 {
+        for index in 0..4 {
+            shards[0].send_message_by_id(
+                target,
+                0,
+                &[Value::int((batch * 4 + index) as i64)],
+            );
+        }
+
+        shards[1].drain_cross_shard_messages();
+        let pending = &shards[1].cross_shard_pending;
+        assert!(pending.is_empty(), "drain must not retain delivered envelopes");
+        if batch == 0 {
+            capacity = pending.capacity();
+            assert!(capacity >= 4, "first batch should establish staging capacity");
+            allocation = pending.as_ptr();
+        } else {
+            assert_eq!(pending.capacity(), capacity, "later batches should reuse capacity");
+            assert_eq!(pending.as_ptr(), allocation, "later batches should reuse the allocation");
+        }
+
+        for index in 0..4 {
+            let received = shards[1]
+                .actors
+                .get_mut(&target)
+                .unwrap()
+                .mailbox
+                .pop()
+                .expect("cross-shard message should reach mailbox in FIFO order");
+            assert_eq!(
+                received.payload.as_slice(),
+                &[Value::int((batch * 4 + index) as i64)],
+            );
+        }
+        assert!(shards[1].actors.get(&target).unwrap().mailbox.is_empty());
+    }
+
+    // An empty pass must preserve the staging allocation as well.
+    shards[1].drain_cross_shard_messages();
+    assert_eq!(shards[1].cross_shard_pending.capacity(), capacity);
+    assert_eq!(shards[1].cross_shard_pending.as_ptr(), allocation);
+}
+
+#[test]
 fn test_object_ref_cross_shard_reuses_node_shared_storage() {
     let mut shards = Runtime::new_sharded(2);
 
