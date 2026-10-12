@@ -58,6 +58,12 @@ class ReleaseCliProfileTests(unittest.TestCase):
         self.assertIn("libc6-dev-arm64-cross", setup)
         self.assertIn("aarch64-linux-gnu-gcc -x c -c -", setup)
         self.assertIn("#include <stdint.h>", setup)
+        smoke_line = next(
+            line for line in setup.splitlines() if "printf '#include <stdint.h>" in line
+        )
+        self.assertIn(r"\n", smoke_line)
+        self.assertNotIn(r"\\n", smoke_line)
+        self.assertEqual(len(smoke_line) - len(smoke_line.rstrip("\\")), 1)
 
 
 if __name__ == "__main__":
