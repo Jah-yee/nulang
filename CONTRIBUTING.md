@@ -21,10 +21,10 @@ minimal back-and-forth.
   references for implementation and language behavior.
 
 **For your first PR:** choose one documentation/example improvement, one
-regression test, or one small bug fix. The repository may have **no currently
-curated beginner issues**; ask in Discussions rather than assuming a label
-means someone is available to mentor. Before starting a substantial issue,
-comment with your intended scope and wait for a maintainer to confirm fit.
+regression test, or one small bug fix. Browse the [curated first-issue queue](https://github.com/nulang-org/nulang/issues?q=is%3Aissue+is%3Aopen+label%3Agood-first-issue)
+for small, scoped tasks. The queue may be empty at times; a label is not
+a promise of mentorship or approval. Comment before starting substantive work
+to confirm ownership and intended scope. If none fit, ask in Discussions.
 
 ## Local setup
 

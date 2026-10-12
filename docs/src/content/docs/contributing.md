@@ -22,8 +22,9 @@ or focused implementation fixes.
   use the bug or feature template when a report is ready.
 
 If you are new to the codebase, start with a small documentation or test
-improvement and link to a concrete problem. Beginner-friendly labels may have
-no currently unclaimed tasks; please ask before starting a large change.
+improvement and link to a concrete problem. Browse [curated starter issues](https://github.com/nulang-org/nulang/issues?q=is%3Aissue+is%3Aopen+label%3Agood-first-issue)
+to find a scoped first contribution. The queue can be empty; comment before
+starting to avoid duplicated work.
 
 ## What maintainers look for
 

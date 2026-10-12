@@ -129,7 +129,8 @@ perform IO.print("Hello, " + name + "!")
 Nulang welcomes focused fixes, tests, runnable examples, documentation, and
 tooling improvements. Start with the [contributor guide](CONTRIBUTING.md), see
 the [roadmap](ROADMAP.md) for priorities, browse
-[open issues](https://github.com/nulang-org/nulang/issues), or
+[starter issues](https://github.com/nulang-org/nulang/issues?q=is%3Aissue+is%3Aopen+label%3Agood-first-issue) or
+[all open issues](https://github.com/nulang-org/nulang/issues), or
 [ask in Discussions](https://github.com/nulang-org/nulang/discussions)
 before taking on a broad design change. The
 [issue forms](https://github.com/nulang-org/nulang/issues/new/choose) help
