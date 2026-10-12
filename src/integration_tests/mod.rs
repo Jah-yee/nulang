@@ -8,8 +8,9 @@ mod tests {
     use crate::lexer::Lexer;
     use crate::parser::Parser;
     use crate::runtime::{
-        grain_actor_id, ActorSnapshot, DehydratePolicy, EventEntry, GrainId, JournalEntry,
-        MemoryStore, PersistenceStore, Runtime, RuntimeVmCallbacks, WorkflowEvent,
+        grain_actor_id, ActorSnapshot, DehydratePolicy, DurableCommit, DurableTailPosition,
+        DurableTransition, EventEntry, GrainId, JournalEntry, MemoryStore, PersistenceStore,
+        Runtime, RuntimeVmCallbacks, WorkflowEvent,
     };
     use crate::typechecker::TypeChecker;
     use crate::types::NuError;
@@ -33,6 +34,23 @@ mod tests {
     }
 
     impl PersistenceStore for SharedMemoryStore {
+        // Keep the shareable test adapter's atomic contract aligned with
+        // MemoryStore. Falling back to PersistenceStore's Unsupported defaults
+        // makes suspended recovery tests fail before they can check the tail.
+        fn commit_transition(
+            &mut self,
+            transition: DurableTransition,
+        ) -> std::io::Result<DurableCommit> {
+            self.0.lock().unwrap().commit_transition(transition)
+        }
+
+        fn load_durable_tail_position(
+            &self,
+            actor_id: u64,
+        ) -> std::io::Result<Option<DurableTailPosition>> {
+            self.0.lock().unwrap().load_durable_tail_position(actor_id)
+        }
+
         fn save_snapshot(&mut self, snapshot: ActorSnapshot) -> std::io::Result<()> {
             self.0.lock().unwrap().save_snapshot(snapshot)
         }
