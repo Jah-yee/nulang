@@ -8729,6 +8729,237 @@ match { a: 2, b: 9 } with {
         );
     }
 
+    /// A signal continuation that throws after resumption must fail closed
+    /// when its StepFailed terminal event cannot be committed.
+    #[test]
+    fn test_workflow_signal_resume_failed_terminal_append_quarantines_actor() {
+        let source = r#"
+            workflow SignalResumeFails {
+                step fail_step {
+                    {
+                        perform Signal.wait("go")
+                        self.answer = "speculative"
+                        let m: Maybe[Int] = None in
+                        match m { | Some(x) => x }
+                    }
+                }
+            }
+            type Maybe[V] = Some(V) | None
+            let w = spawn SignalResumeFails {} in { w }
+        "#;
+        let backing = SharedMemoryStore::new();
+        let (module, _ty) = compile_source(source).unwrap();
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        rt.borrow_mut().persistence = Box::new(RejectStepFailedStore(backing.clone()));
+
+        let value = {
+            let mut vm = VM::new();
+            vm.load_module(module);
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+            vm.run().unwrap()
+        };
+        let actor_id = value.as_actor_id().expect("spawn should return actor ref");
+        rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        rt.borrow_mut().run_scheduler();
+        assert_eq!(
+            rt.borrow().actors.get(&actor_id).unwrap().waiting_signal.as_deref(),
+            Some("go"),
+        );
+        rt.borrow_mut().signal_workflow(actor_id, "go", None).unwrap();
+
+        assert!(
+            !rt.borrow().actors.contains_key(&actor_id),
+            "signal resumed failure must quarantine after terminal append rejection"
+        );
+        assert!(
+            !backing.read_workflow_events(actor_id).iter().any(|event| {
+                matches!(event, WorkflowEvent::StepFailed { .. })
+            }),
+            "rejected StepFailed must not appear in committed history"
+        );
+        assert_eq!(
+            backing.load_snapshot(actor_id).unwrap().state.get("step_index"),
+            Some(&crate::runtime::PersistedValue::Int(0)),
+            "terminal failure must preserve last safe step"
+        );
+        assert!(
+            backing.load_snapshot(actor_id).unwrap().state.get("answer").is_none(),
+            "speculative resumed mutation must not be checkpointed"
+        );
+    }
+
+    /// A timer continuation that throws after resumption must fail closed
+    /// when its StepFailed terminal event cannot be committed.
+    #[test]
+    fn test_workflow_timer_resume_failed_terminal_append_quarantines_actor() {
+        let source = r#"
+            workflow TimerResumeFails {
+                step fail_step {
+                    {
+                        perform Timer.sleep(50)
+                        self.answer = "speculative"
+                        let m: Maybe[Int] = None in
+                        match m { | Some(x) => x }
+                    }
+                }
+            }
+            type Maybe[V] = Some(V) | None
+            let w = spawn TimerResumeFails {} in { w }
+        "#;
+        let backing = SharedMemoryStore::new();
+        let (module, _ty) = compile_source(source).unwrap();
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        rt.borrow_mut().persistence = Box::new(RejectStepFailedStore(backing.clone()));
+        rt.borrow_mut().install_virtual_clock();
+
+        let value = {
+            let mut vm = VM::new();
+            vm.load_module(module);
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+            vm.run().unwrap()
+        };
+        let actor_id = value.as_actor_id().expect("spawn should return actor ref");
+        rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        rt.borrow_mut().step_actor(actor_id);
+        assert!(rt.borrow().actors.get(&actor_id).unwrap().suspended_execution.is_some());
+        rt.borrow_mut().advance_time(std::time::Duration::from_millis(100));
+        rt.borrow_mut().tick_timers();
+
+        assert!(
+            !rt.borrow().actors.contains_key(&actor_id),
+            "timer resumed failure must quarantine after terminal append rejection"
+        );
+        assert!(
+            !backing.read_workflow_events(actor_id).iter().any(|event| {
+                matches!(event, WorkflowEvent::StepFailed { .. })
+            }),
+            "rejected StepFailed must not appear in committed history"
+        );
+        assert_eq!(
+            backing.load_snapshot(actor_id).unwrap().state.get("step_index"),
+            Some(&crate::runtime::PersistedValue::Int(0)),
+            "terminal failure must preserve last safe step"
+        );
+        assert!(
+            backing.load_snapshot(actor_id).unwrap().state.get("answer").is_none(),
+            "speculative resumed mutation must not be checkpointed"
+        );
+    }
+
+    /// A receive continuation that throws after resumption must fail closed
+    /// when its StepFailed terminal event cannot be committed.
+    #[test]
+    fn test_workflow_receive_resume_failed_terminal_append_quarantines_actor() {
+        let source = r#"
+            workflow ReceiveResumeFails {
+                step fail_step {
+                    {
+                        self.answer = receive {
+                            | fail_step() => 1
+                        } after 50 => 4242
+                        let m: Maybe[Int] = None in
+                        match m { | Some(x) => x }
+                    }
+                }
+            }
+            type Maybe[V] = Some(V) | None
+            let w = spawn ReceiveResumeFails {} in { w }
+        "#;
+        let backing = SharedMemoryStore::new();
+        let (module, _ty) = compile_source(source).unwrap();
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        rt.borrow_mut().persistence = Box::new(RejectStepFailedStore(backing.clone()));
+        rt.borrow_mut().install_virtual_clock();
+
+        let value = {
+            let mut vm = VM::new();
+            vm.load_module(module);
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+            vm.run().unwrap()
+        };
+        let actor_id = value.as_actor_id().expect("spawn should return actor ref");
+        rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        rt.borrow_mut().step_actor(actor_id);
+        assert!(rt.borrow().actors.get(&actor_id).unwrap().suspended_execution.is_some());
+        rt.borrow_mut().advance_time(std::time::Duration::from_millis(100));
+        rt.borrow_mut().tick_timers();
+
+        assert!(
+            !rt.borrow().actors.contains_key(&actor_id),
+            "receive resumed failure must quarantine after terminal append rejection"
+        );
+        assert!(
+            !backing.read_workflow_events(actor_id).iter().any(|event| {
+                matches!(event, WorkflowEvent::StepFailed { .. })
+            }),
+            "rejected StepFailed must not appear in committed history"
+        );
+        assert_eq!(
+            backing.load_snapshot(actor_id).unwrap().state.get("step_index"),
+            Some(&crate::runtime::PersistedValue::Int(0)),
+            "terminal failure must preserve last safe step"
+        );
+        assert!(
+            backing.load_snapshot(actor_id).unwrap().state.get("answer").is_none(),
+            "speculative resumed mutation must not be checkpointed"
+        );
+    }
+
+    /// A llm continuation that throws after resumption must fail closed
+    /// when its StepFailed terminal event cannot be committed.
+    #[cfg(feature = "ai-runtime")]
+    #[test]
+    fn test_workflow_llm_resume_failed_terminal_append_quarantines_actor() {
+        let source = r#"
+            workflow LlmResumeFails {
+                step fail_step {
+                    {
+                        self.answer = perform Inference.ask("hello")
+                        let m: Maybe[Int] = None in
+                        match m { | Some(x) => x }
+                    }
+                }
+            }
+            type Maybe[V] = Some(V) | None
+            let w = spawn LlmResumeFails {} in { w }
+        "#;
+        let backing = SharedMemoryStore::new();
+        let (module, _ty) = compile_source(source).unwrap();
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        rt.borrow_mut().persistence = Box::new(RejectStepFailedStore(backing.clone()));
+        rt.borrow_mut().set_llm_client(Box::new(nulang_ai::MockLlmClient::text("world")));
+
+        let value = {
+            let mut vm = VM::new();
+            vm.load_module(module);
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+            vm.run().unwrap()
+        };
+        let actor_id = value.as_actor_id().expect("spawn should return actor ref");
+        rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        rt.borrow_mut().run_scheduler();
+
+        assert!(
+            !rt.borrow().actors.contains_key(&actor_id),
+            "llm resumed failure must quarantine after terminal append rejection"
+        );
+        assert!(
+            !backing.read_workflow_events(actor_id).iter().any(|event| {
+                matches!(event, WorkflowEvent::StepFailed { .. })
+            }),
+            "rejected StepFailed must not appear in committed history"
+        );
+        assert_eq!(
+            backing.load_snapshot(actor_id).unwrap().state.get("step_index"),
+            Some(&crate::runtime::PersistedValue::Int(0)),
+            "terminal failure must preserve last safe step"
+        );
+        assert!(
+            backing.load_snapshot(actor_id).unwrap().state.get("answer").is_none(),
+            "speculative resumed mutation must not be checkpointed"
+        );
+    }
+
     /// Crash-and-recover for a workflow step suspended on `Inference.ask`: the
     /// persisted suspension marker lets recovery re-drive the interrupted
     /// step, which re-issues the call on the new runtime and completes the
