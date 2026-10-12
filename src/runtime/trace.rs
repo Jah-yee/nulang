@@ -265,7 +265,8 @@ impl TraceContext {
         actor_id: u64,
         behavior_idx: usize,
     ) -> Option<tracing::span::EnteredSpan> {
-        self.enter_dispatch_span_with_context(actor_id, behavior_idx).0
+        self.enter_dispatch_span_with_context(actor_id, behavior_idx)
+            .0
     }
 
     /// Enter the actor span and return its actual exported identity for
@@ -382,9 +383,8 @@ mod tests {
         use tracing_subscriber::prelude::*;
 
         let provider = opentelemetry_sdk::trace::TracerProvider::builder().build();
-        let subscriber = tracing_subscriber::registry().with(
-            tracing_opentelemetry::layer().with_tracer(provider.tracer("nulang-test")),
-        );
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("nulang-test")));
         tracing::subscriber::with_default(subscriber, || {
             let parent = TraceContext::from_traceparent(
                 "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
