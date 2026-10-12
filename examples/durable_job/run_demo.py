@@ -23,7 +23,8 @@ def run_phase(command: list[str], cwd: Path, phase: str, expected: list[str], ti
     env["DEMO_PHASE"] = phase
     env["DEMO_BASELINE_DB"] = str(cwd / "baseline.sqlite3")
     if phase == "prepare":
-        proc = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        proc = subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 encoding="utf-8", bufsize=1)
         try:
             assert proc.stdout is not None
@@ -38,7 +39,9 @@ def run_phase(command: list[str], cwd: Path, phase: str, expected: list[str], ti
                     raise RuntimeError(f"prepare did not emit checkpoint, output={observed}")
                 line = proc.stdout.readline()
                 if not line:
-                    raise RuntimeError(f"prepare exited before checkpoint, output={observed}")
+                    out, err = proc.communicate(timeout=timeout)
+                    raise RuntimeError(f"prepare exited before checkpoint: rc={proc.returncode}, "
+                                       f"output={observed + out.splitlines()}, stderr={err.strip()}")
                 observed.append(line.strip())
             if proc.poll() is not None:
                 raise RuntimeError("prepare process exited before injection")
@@ -67,9 +70,8 @@ def run_phase(command: list[str], cwd: Path, phase: str, expected: list[str], ti
 def exercise(name: str, command: list[str], timeout: float) -> None:
     with tempfile.TemporaryDirectory(prefix=f"nulang-{name}-") as temp:
         wd = Path(temp)
-        os.mkfifo(wd / "gate.fifo")
         if name == "nulang":
-            command = [command[0], "--backend", "bytecode", "--with", "fs", "--store", f"json:{wd / 'store'}", str(ROOT / "job.nula")]
+            command = [command[0], "--backend", "bytecode", "--store", f"json:{wd / 'store'}", str(ROOT / "job.nula")]
         print(f"{name}: isolated store and three separate processes")
         run_phase(command, wd, "prepare", ["PREPARED=1:0"], timeout)
         run_phase(command, wd, "resume", ["RECOVERED=1:0", "COMPLETED=2:1"], timeout)
@@ -83,8 +85,8 @@ def main() -> int:
     parser.add_argument("--baseline-only", action="store_true", help="Verify only the Python/SQLite comparator")
     parser.add_argument("--timeout", type=float, default=20, help="Per-process timeout in seconds")
     args = parser.parse_args()
-    if os.name != "posix" or not hasattr(os, "mkfifo"):
-        parser.error("requires POSIX FIFO + SIGKILL (Linux/macOS)")
+    if os.name != "posix":
+        parser.error("requires POSIX SIGKILL (Linux/macOS)")
     if args.timeout <= 0:
         parser.error("timeout must be positive")
     baseline = [sys.executable, str(ROOT / "sqlite_baseline.py")]
