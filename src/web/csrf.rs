@@ -124,9 +124,7 @@ pub fn validate_mutation_origin(
     }
 }
 
-//! Browser mutation provenance gate for the experimental HTTP dev server.
-//!
-//! Tests specify the contract before integrating it into request dispatch.
+// Origin policy regression tests for the experimental HTTP server.
 
 #[cfg(test)]
 mod tests {
