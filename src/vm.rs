@@ -1237,26 +1237,9 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
             let s = resolve_value_string(constants, *regs.first().unwrap_or(&Value::nil()));
             let start = regs.get(1).and_then(|v| v.as_int()).unwrap_or(0);
             let len = regs.get(2).and_then(|v| v.as_int()).unwrap_or(0);
-            // Byte offsets are part of String.substring's existing ABI, but
-            // slicing a Rust UTF-8 str inside a code point panics. Reject
-            // unaligned spans rather than constructing invalid UTF-8.
-            if start < 0 || len < 0 {
-                return Some(Value::nil());
-            }
-            // An i64 offset need not fit usize on 32-bit hosts. Refuse an
-            // unrepresentable start and saturate an oversized requested span.
-            let Ok(start) = usize::try_from(start) else {
+            let Some(sub) = utf8_substring_by_bytes(&s, start, len) else {
                 return Some(Value::nil());
             };
-            if start > s.len() {
-                return Some(Value::nil());
-            }
-            let len = usize::try_from(len).unwrap_or(usize::MAX);
-            let end = start.saturating_add(len).min(s.len());
-            if !s.is_char_boundary(start) || !s.is_char_boundary(end) {
-                return Some(Value::nil());
-            }
-            let sub = &s[start..end];
             let bytes = sub.as_bytes().to_vec();
             match self.heap.alloc(bytes.len() + 1, HeapTypeTag::String) {
                 Some(ptr) => {
@@ -2732,6 +2715,25 @@ pub const CLOSURE_ENV_IDX_MASK: u64 = CLOSURE_ENV_FLAG - 1;
 /// fixed, predictable amount of memory instead of running unboundedly
 /// toward an uncontrolled OOM.
 const MAX_CLOSURE_ENVS: usize = 10_000_000;
+
+/// Return a UTF-8-safe substring using the existing byte-offset API.
+///
+/// This does not reinterpret offsets as character indices: a span that cuts
+/// through a UTF-8 code point is invalid, even when its length would be
+/// otherwise in bounds. Bounds from a Nulang Int may not fit `usize` on
+/// 32-bit hosts, so conversion and addition are guarded.
+fn utf8_substring_by_bytes(s: &str, start: i64, len: i64) -> Option<&str> {
+    let start = usize::try_from(start).ok()?;
+    let len = usize::try_from(len).unwrap_or(usize::MAX);
+    if start > s.len() {
+        return None;
+    }
+    let end = start.saturating_add(len).min(s.len());
+    if !s.is_char_boundary(start) || !s.is_char_boundary(end) {
+        return None;
+    }
+    Some(&s[start..end])
+}
 
 impl VM {
     /// Create a new VM with the JIT tiering enabled (the default).
