@@ -8547,8 +8547,8 @@ mod vm_tests {
         for (register, index) in indices.iter().enumerate() {
             module.emit(Instruction::new3(
                 OpCode::ConstU,
-                ((index >> 8) & 0xFF) as u8,
-                (index & 0xFF) as u8,
+                ((*index >> 8) & 0xFF) as u8,
+                (*index & 0xFF) as u8,
                 register as u8,
             ));
         }
