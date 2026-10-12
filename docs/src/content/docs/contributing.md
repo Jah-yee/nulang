@@ -19,7 +19,7 @@ or focused implementation fixes.
 - **[GitHub Discussions](https://github.com/nulang-org/nulang/discussions)**:
   questions, onboarding, and early design feedback.
 - **[New issue](https://github.com/nulang-org/nulang/issues/new/choose)**:
-  use the bug or feature template when a report is ready.
+  use the bug, documentation, or feature template when a report is ready.
 
 If you are new to the codebase, start with a small documentation or test
 improvement and link to a concrete problem. Browse [curated starter issues](https://github.com/nulang-org/nulang/issues?q=is%3Aissue+is%3Aopen+label%3Agood-first-issue)

@@ -12,7 +12,8 @@ minimal back-and-forth.
 - [Open issues](https://github.com/nulang-org/nulang/issues): check for an
   existing report before creating a new one.
 - [Issue forms](https://github.com/nulang-org/nulang/issues/new/choose):
-  report a reproducible bug or propose a scoped improvement.
+  report a reproducible bug, request an improvement, or submit a
+  documentation correction (no Rust setup required for typo reports).
 - [Discussions](https://github.com/nulang-org/nulang/discussions): questions,
   help getting started, or design exploration before a large PR.
 - [Architecture](ARCHITECTURE.md),
@@ -83,6 +84,17 @@ and invariant verification. Otherwise the Cargo commands above are valid
 starting points. The CI matrix contains additional no-default-features,
 release, formal, audit, documentation and backend checks. Don't claim you
 ran checks you did not run.
+
+### If CI is blocked
+
+A check that is **queued, cancelled, or skipped** is not a passing test.
+First verify the PR's current head SHA and distinguish infrastructure problems
+from a completed failed test. Do not repeatedly rerun queued workflows, disable
+branch protection, or merge based on a separate deployment preview. If a job
+actually fails, link its exact run and first relevant error in your PR; if
+independent PRs are all queued, notify maintainers with example run URLs.
+See [CI queue investigation #1431](https://github.com/nulang-org/nulang/issues/1431)
+for the current incident, rather than opening duplicate reports.
 
 For docs-site content:
 

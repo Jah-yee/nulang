@@ -12,7 +12,9 @@ not a promise of response times or unconditional acceptance.
    the report is a bug, feature request, docs issue, or support question.
 3. **Request evidence only if needed:** exact version/commit, platform,
    feature flags, smallest reproduction, observed vs expected results, and
-   relevant logs with secrets removed.
+   relevant logs with secrets removed. For a spelling or navigation fix,
+   a page URL and correction are enough; do **not** demand a compiler build
+   or reproduction environment.
 4. **Decide priority and scope:** correctness/security/compatibility and the
    active [stabilization gate](../docs/SEMANTIC_STABILIZATION_CONTRACT.md) come
    before speculative surface expansion. Record what will be accepted and the
@@ -53,7 +55,11 @@ A good task description answers:
 5. Offer specific requested changes, with file/line references and test
    expectations. Avoid requiring full-suite local execution for docs-only
    edits; use risk-adjusted checks.
-6. Before merge, verify requested review changes, CI, no new regressions,
+6. When checks are queued, cancelled or skipped, distinguish an unexecuted
+   lane from a code failure. Link the existing queue incident (currently
+   [#1431](https://github.com/nulang-org/nulang/issues/1431)) rather than
+   rerunning many jobs or treating deployment success as sufficient evidence.
+7. Before merge, verify requested review changes, CI, no new regressions,
    and a clear compatibility decision. The project steward retains final
    authority as defined in governance.
 
