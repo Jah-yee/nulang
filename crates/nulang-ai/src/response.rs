@@ -169,6 +169,17 @@ mod tests {
     }
 
     #[test]
+    fn test_token_usage_total_saturates_instead_of_overflowing() {
+        let overflow = TokenUsage::new(u32::MAX, 1);
+        assert_eq!(overflow.prompt, u32::MAX);
+        assert_eq!(overflow.completion, 1);
+        assert_eq!(overflow.total, u32::MAX);
+
+        let both_max = TokenUsage::new(u32::MAX, u32::MAX);
+        assert_eq!(both_max.total, u32::MAX);
+    }
+
+    #[test]
     fn test_tool_call_construction() {
         let mut args = serde_json::Map::new();
         args.insert(
