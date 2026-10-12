@@ -62,7 +62,10 @@ fn child_compiled_llm_suspended_before_response() {
     {
         let live = rt.borrow();
         let actor = live.actors.get(&actor_id).expect("live workflow");
-        assert!(actor.suspended_execution.is_some(), "compiled LLM call must suspend");
+        assert!(
+            actor.suspended_execution.is_some(),
+            "compiled LLM call must suspend"
+        );
         assert!(actor.llm_inflight, "LLM call must be in flight");
         assert_eq!(
             actor.get_state_field("step_index").and_then(|v| v.as_int()),
@@ -78,7 +81,9 @@ fn child_compiled_llm_suspended_before_response() {
 
     // The parent kills only after the checked persistent boundary is visible.
     println!("{READY}{actor_id}");
-    std::io::stdout().flush().expect("flush readiness acknowledgment");
+    std::io::stdout()
+        .flush()
+        .expect("flush readiness acknowledgment");
     loop {
         std::thread::park();
     }
@@ -111,7 +116,9 @@ fn sigkill_of_compiled_inference_workflow_recovers_without_losing_step() {
     let (sender, receiver) = mpsc::channel();
     let reader = std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
-            let Ok(line) = line else { break };
+            let Ok(line) = line else {
+                break;
+            };
             if let Some(id) = line.split(READY).nth(1) {
                 let _ = sender.send(id.trim().parse::<u64>());
                 return;
@@ -133,7 +140,10 @@ fn sigkill_of_compiled_inference_workflow_recovers_without_losing_step() {
     // This is a genuinely new process, connection and runtime. Recompile and
     // register the same actor executable before restoring the accepted step.
     let (module, _) = compile_source(SOURCE).expect("recompile recovery module");
-    let meta = module.actor_metadata.first().expect("workflow actor metadata");
+    let meta = module
+        .actor_metadata
+        .first()
+        .expect("workflow actor metadata");
     let mut offsets = vec![0; module.behaviors.len()];
     for &index in &meta.behavior_indices {
         if let Some(entry) = module.behaviors.get(index) {
@@ -144,7 +154,8 @@ fn sigkill_of_compiled_inference_workflow_recovers_without_losing_step() {
     let rt = Rc::new(RefCell::new(Runtime::new()));
     rt.borrow_mut().persistence = Box::new(LibsqlStore::new(&db_path).expect("reopen SQLite"));
     let provider = nulang_ai::MockLlmClient::text("recovered-response");
-    rt.borrow_mut().set_llm_client(Box::new(provider.clone()));
+    rt.borrow_mut()
+        .set_llm_client(Box::new(provider.clone()));
     rt.borrow_mut().register_recovery_module(
         actor_id,
         module.clone(),
@@ -179,7 +190,10 @@ fn sigkill_of_compiled_inference_workflow_recovers_without_losing_step() {
                 WorkflowEvent::StepCompleted { step_name, .. } if step_name == "ask_step"
             ))
             .count();
-        assert_eq!(completions, 1, "terminal step must appear once in SQLite");
+        assert_eq!(
+            completions, 1,
+            "terminal step must appear once in SQLite"
+        );
     }
 
     let calls = provider.recorded_calls();
