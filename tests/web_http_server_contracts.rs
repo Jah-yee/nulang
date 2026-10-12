@@ -193,7 +193,10 @@ fn web_redirect_returns_real_303_over_http() {
         response.starts_with("HTTP/1.1 303 See Other\r\n"),
         "{response}"
     );
-    assert!(response.contains("\r\nLocation: /receipt?ok=yes\r\n"), "{response}");
+    assert!(
+        response.contains("\r\nLocation: /receipt?ok=yes\r\n"),
+        "{response}"
+    );
     assert_eq!(response_body(&response), "");
 }
 
