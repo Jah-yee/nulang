@@ -852,6 +852,40 @@ mod tests {
     }
 
     #[test]
+    fn test_actor_query_handlers_allocate_only_for_workflows_and_reset_on_reuse() {
+        let mut actor = Actor::new(1, "idle", 0);
+        assert_eq!(
+            std::mem::size_of_val(&actor.query_handlers),
+            std::mem::size_of::<usize>(),
+            "cold query-handler metadata should occupy a single pointer"
+        );
+        assert!(!actor.query_handlers.is_allocated());
+        assert!(actor.query_handlers.is_empty());
+        assert_eq!(actor.query_handlers.get("health"), None);
+        assert!(!actor.query_handlers.is_allocated(), "reads must not allocate");
+
+        assert_eq!(
+            actor.query_handlers.insert("health".to_string(), Value::int(7)),
+            None
+        );
+        assert!(actor.query_handlers.is_allocated());
+        assert_eq!(actor.query_handlers.get("health"), Some(&Value::int(7)));
+        assert_eq!(
+            actor.query_handlers.insert("health".to_string(), Value::int(8)),
+            Some(Value::int(7)),
+            "overwriting should retain HashMap insertion semantics"
+        );
+        assert_eq!(actor.query_handlers.get("health"), Some(&Value::int(8)));
+
+        // Pooling must not leak query handlers across actor identities, nor
+        // retain their backing allocation after it is no longer needed.
+        actor.reset(2, "reused", 0);
+        assert!(!actor.query_handlers.is_allocated());
+        assert!(actor.query_handlers.is_empty());
+        assert_eq!(actor.query_handlers.get("health"), None);
+    }
+
+    #[test]
     fn test_actor_set_and_get_state_field() {
         let mut actor = Actor::new(1, "test", 0);
         actor.set_state_field("key", Value::int(42));
