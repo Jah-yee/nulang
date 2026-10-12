@@ -1275,7 +1275,11 @@ fn cmd_build_wasm() -> NuResult<()> {
     eprintln!("Building {} (WASM AOT)...", name);
     eprintln!("  Compiling {} to WASM...", entry.display());
     let wasm_args = compiler_args_with_manifest_capabilities(&[
-        "--backend", "wasm-aot", "--out", &wasm_path_str, &entry_str,
+        --backend,
+        wasm-aot,
+        --out,
+        &wasm_path_str,
+        &entry_str,
     ]);
     let wasm_refs: Vec<&str> = wasm_args.iter().map(String::as_str).collect();
     nulang_exe(&wasm_refs)?;
@@ -2300,7 +2304,11 @@ fn cmd_deploy(
         let wasm_path_str = wasm_path.to_string_lossy().into_owned();
         eprintln!("Compiling {} to .wasm + .cwasm...", name);
         let wasm_args = compiler_args_with_manifest_capabilities(&[
-            "--backend", "wasm-aot", "--out", &wasm_path_str, &entry_str,
+            --backend,
+            wasm-aot,
+            --out,
+            &wasm_path_str,
+            &entry_str,
         ]);
         let wasm_refs: Vec<&str> = wasm_args.iter().map(String::as_str).collect();
         nulang_exe(&wasm_refs)?;
@@ -2620,10 +2628,8 @@ mod tests {
 
     #[test]
     fn test_compiler_args_forward_manifest_capabilities_to_wasm_and_json() {
-        let dir = std::env::temp_dir().join(format!(
-            "nulang_compiler_cap_args_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("nulang_compiler_cap_args_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         scaffold_package(&dir, "cap-args", "default").expect("scaffold should succeed");
@@ -2633,22 +2639,40 @@ mod tests {
 
         let _guard = ChangeDir::new(&dir);
         let wasm = compiler_args_with_manifest_capabilities(&[
-            "--backend", "wasm-aot", "--out", "dist/cap-args.wasm", "src/main.nula",
+            "--backend",
+            "wasm-aot",
+            "--out",
+            "dist/cap-args.wasm",
+            "src/main.nula",
         ]);
         assert_eq!(
             wasm.iter().map(String::as_str).collect::<Vec<_>>(),
             vec![
-                "--backend", "wasm-aot", "--out", "dist/cap-args.wasm", "src/main.nula",
-                "--with", "net", "--with", "fs",
+                "--backend",
+                "wasm-aot",
+                "--out",
+                "dist/cap-args.wasm",
+                "src/main.nula",
+                "--with",
+                "net",
+                "--with",
+                "fs",
             ]
         );
 
-        let check = compiler_args_with_manifest_capabilities(&[
-            "--json", "--check", "src/main.nula",
-        ]);
+        let check =
+            compiler_args_with_manifest_capabilities(&["--json", "--check", "src/main.nula"]);
         assert_eq!(
             check.iter().map(String::as_str).collect::<Vec<_>>(),
-            vec!["--json", "--check", "src/main.nula", "--with", "net", "--with", "fs"]
+            vec![
+                "--json",
+                "--check",
+                "src/main.nula",
+                "--with",
+                "net",
+                "--with",
+                "fs"
+            ]
         );
 
         manifest.package.capabilities.clear();
