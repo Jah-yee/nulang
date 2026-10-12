@@ -285,8 +285,14 @@ impl TraceContext {
         let effective = *self;
         #[cfg(feature = "otel")]
         {
-            span.record("trace_id", tracing::field::display(format!("{:032x}", effective.trace_id)));
-            span.record("span_id", tracing::field::display(format!("{:016x}", effective.span_id)));
+            span.record(
+                "trace_id",
+                tracing::field::display(format!("{:032x}", effective.trace_id)),
+            );
+            span.record(
+                "span_id",
+                tracing::field::display(format!("{:016x}", effective.span_id)),
+            );
         }
         (Some(span.entered()), effective)
     }
@@ -351,7 +357,10 @@ mod tests {
     fn incoming_http_traceparent_is_case_insensitive_and_rejects_duplicates() {
         let headers = vec![
             ("Content-Type".to_owned(), "application/json".to_owned()),
-            ("TrAcEpArEnT".to_owned(), " 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01 ".to_owned()),
+            (
+                "TrAcEpArEnT".to_owned(),
+                " 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01 ".to_owned(),
+            ),
         ];
         let parent = TraceContext::from_http_headers(&headers).expect("valid HTTP parent");
         assert_eq!(parent.trace_id(), 0x4bf92f3577b34da6a3ce929d0e0e4736);
@@ -372,12 +381,14 @@ mod tests {
         use tracing_subscriber::prelude::*;
 
         let provider = opentelemetry_sdk::trace::TracerProvider::builder().build();
-        let subscriber = tracing_subscriber::registry()
-            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("nulang-test")));
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::layer().with_tracer(provider.tracer("nulang-test")),
+        );
         tracing::subscriber::with_default(subscriber, || {
             let parent = TraceContext::from_traceparent(
-                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
-            ).unwrap();
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            )
+            .unwrap();
             let child = parent.child();
             let (guard, emitted) = child.enter_dispatch_span_with_context(17, 2);
             let _guard = guard.expect("TRACE subscriber enables actor span");
@@ -385,12 +396,24 @@ mod tests {
             let actual_span = active.span();
             let context = actual_span.span_context();
             assert!(context.is_valid());
-            assert_eq!(context.trace_id().to_bytes(), parent.trace_id().to_be_bytes());
-            assert_eq!(context.span_id().to_bytes(), emitted.span_id().to_be_bytes());
+            assert_eq!(
+                context.trace_id().to_bytes(),
+                parent.trace_id().to_be_bytes()
+            );
+            assert_eq!(
+                context.span_id().to_bytes(),
+                emitted.span_id().to_be_bytes()
+            );
             assert_eq!(emitted.parent_span_id(), parent.span_id());
             assert_ne!(emitted.span_id(), parent.span_id());
-            assert_eq!(emitted.to_traceparent(),
-                format!("00-{:032x}-{:016x}-01", parent.trace_id(), emitted.span_id()));
+            assert_eq!(
+                emitted.to_traceparent(),
+                format!(
+                    "00-{:032x}-{:016x}-01",
+                    parent.trace_id(),
+                    emitted.span_id()
+                )
+            );
         });
     }
 
