@@ -8368,8 +8368,6 @@ fn counter_grain_module() -> crate::bytecode::CodeModule {
     module
 }
 
-/// A grain message sent from shard 0 to a grain owned by shard 1 is routed
-/// across shards and hydrates the grain on the owning shard.
 /// A cross-shard grain send already owns its Vec payload. For more than four
 /// values, moving that allocation into MessagePayload must be zero-copy.
 #[test]
@@ -8412,6 +8410,8 @@ fn test_cross_shard_grain_owned_large_payload_preserves_allocation() {
     }
 }
 
+/// A grain message sent from shard 0 to a grain owned by shard 1 is routed
+/// across shards and hydrates the grain on the owning shard.
 #[test]
 fn test_send_to_grain_cross_shard_routes_and_hydrates() {
     let module = counter_grain_module();
