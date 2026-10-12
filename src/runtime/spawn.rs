@@ -239,10 +239,9 @@ fn try_spawn_actor_with_id(
                     .copied()
                     .unwrap_or(StateModel::Local);
                 if model.is_persistent() {
-                    state.push(PersistedValue::from_value_resolved(
-                        value,
-                        actor.bytecode_module.as_deref(),
-                    ));
+                    // Heap-backed string defaults require actor provenance;
+                    // the generic conversion would silently encode them as Nil.
+                    state.push(actor.persist_value(value));
                 }
             }
             state
