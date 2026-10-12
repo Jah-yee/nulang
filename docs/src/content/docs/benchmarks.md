@@ -24,22 +24,22 @@ These are **median logical messages per second** across three measured repetitio
 |---|---|
 | Source | [Successful workflow run #38193394276](https://github.com/nulang-org/nulang/actions/runs/38193394276) · [result artifact](https://github.com/nulang-org/nulang/actions/runs/38193394276/artifacts/11722402594) |
 | Run date | 2026-10-12 UTC |
-| Source revision | Workflow artifact generated for checkout SHA \`ca509b037ff4d7b5c3351a3590ede6b08e41f87d\` (pull-request test checkout) |
+| Source revision | Workflow artifact generated for checkout SHA `ca509b037ff4d7b5c3351a3590ede6b08e41f87d` (pull-request test checkout) |
 | Host | GitHub-hosted Ubuntu 24.04 x86-64 runner (shared hardware) |
-| CPU configuration | \`--cpu-mode single\`, affinity \`[0]\`, Nulang one runtime shard |
+| CPU configuration | `--cpu-mode single`, affinity `[0]`, Nulang one runtime shard |
 | Runs | 1 warm-up, 3 measured repetitions; median reported |
-| Nulang | Standalone \`nulang-savina\` optimized profile, bytecode actors |
-| Rust | rustc 1.99.0, \`std::sync::mpsc\` plus native OS threads |
+| Nulang | Standalone `nulang-savina` optimized profile, bytecode actors |
+| Rust | rustc 1.99.0, `std::sync::mpsc` plus native OS threads |
 | Go | Go 1.25.14, channels and goroutines |
 | Erlang | Erlang/OTP 25.3.2, native processes/mailboxes |
 
 To repeat the suite on a Linux host with Rust, Go, Erlang and Python installed:
 
-\`\`\`bash
+```bash
 python3 scripts/cross_runtime_bench.py \
   --runs 5 --warmup 1 --cpu-mode single \
   --output cross-runtime-results.json
-\`\`\`
+```
 
 The output JSON includes runtime and toolchain metadata, input counts, individual timings and medians. The recorded run above used **three** measured repetitions; the command uses five for a more useful new measurement. See the [benchmark contract and limitations](https://github.com/nulang-org/nulang/blob/main/benchmarks/cross_runtime/README.md) and the [runner implementation](https://github.com/nulang-org/nulang/blob/main/scripts/cross_runtime_bench.py).
 
@@ -55,7 +55,7 @@ These are **Savina-style** fixtures, not canonical Savina scores. The Rust basel
 |---|---|---|
 | **Nulang** | Nulang bytecode actors and runtime scheduler | **Measured** in table above |
 | **Erlang/OTP** | BEAM processes and mailboxes (without measuring OTP supervisor lifecycle) | **Measured primitives**; full OTP workloads not measured |
-| **Rust standard library** | Native threads with \`std::sync::mpsc\` | **Measured language baseline**, not an actor framework |
+| **Rust standard library** | Native threads with `std::sync::mpsc` | **Measured language baseline**, not an actor framework |
 | **Go standard library** | Goroutines with channels | **Measured language baseline**, not an actor framework |
 | [Apache Pekko](https://pekko.apache.org/) / [Akka](https://akka.io/) | JVM actor frameworks | Not yet measured on the matched suite |
 | [Actix](https://github.com/actix/actix) | Rust actor framework | Not yet measured on the matched suite |
