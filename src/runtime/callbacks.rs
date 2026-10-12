@@ -16,7 +16,7 @@
 //!   `Gossip` opcodes).
 
 #[cfg(feature = "ai-runtime")]
-use super::agent;
+use super::{agent, llm};
 use super::cluster::NodeId;
 use super::distributed::{send_distributed, spawn_on_node, ActorAddress};
 use super::http_server::HttpServerState;
