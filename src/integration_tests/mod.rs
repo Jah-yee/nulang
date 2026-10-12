@@ -12401,10 +12401,13 @@ match { a: 2, b: 9 } with {
                 step write { self.answer = 42 }
             }
         "#;
-        assert!(
-            compile_source(source).is_err(),
-            "a workflow must reject assigning Int to a declared durable String field"
-        );
+        match compile_source(source) {
+            Err(NuError::TypeError { msg, .. }) => {
+                assert!(msg.contains("Type mismatch"), "{msg}");
+            }
+            Err(err) => panic!("expected an assignment type error, got {err}"),
+            Ok(_) => panic!("wrong-typed durable assignment unexpectedly compiled"),
+        }
     }
 
     #[test]
@@ -12415,10 +12418,13 @@ match { a: 2, b: 9 } with {
                 step write { self.temporary = "wrong" }
             }
         "#;
-        assert!(
-            compile_source(source).is_err(),
-            "local workflow state must also preserve its declared type"
-        );
+        match compile_source(source) {
+            Err(NuError::TypeError { msg, .. }) => {
+                assert!(msg.contains("Type mismatch"), "{msg}");
+            }
+            Err(err) => panic!("expected a local field type error, got {err}"),
+            Ok(_) => panic!("wrong-typed local assignment unexpectedly compiled"),
+        }
     }
 
     #[test]
@@ -12429,6 +12435,12 @@ match { a: 2, b: 9 } with {
                 step write { self.count = 1 }
             }
         "#;
-        assert!(compile_source(source).is_err(), "invalid durable field default must fail type checking");
+        match compile_source(source) {
+            Err(NuError::TypeError { msg, .. }) => {
+                assert!(msg.contains("Type mismatch"), "{msg}");
+            }
+            Err(err) => panic!("expected a default type error, got {err}"),
+            Ok(_) => panic!("wrong-typed durable default unexpectedly compiled"),
+        }
     }
 }
