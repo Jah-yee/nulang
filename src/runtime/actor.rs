@@ -905,6 +905,8 @@ mod tests {
         assert!(!actor.query_handlers.is_allocated());
         assert!(actor.query_handlers.is_empty());
         assert_eq!(actor.query_handlers.get("health"), None);
+        assert!(!actor.query_handlers.contains_key("health"));
+        assert_eq!(actor.query_handlers.keys().count(), 0);
         assert!(!actor.query_handlers.is_allocated(), "reads must not allocate");
 
         assert_eq!(
@@ -919,6 +921,11 @@ mod tests {
             "overwriting should retain HashMap insertion semantics"
         );
         assert_eq!(actor.query_handlers.get("health"), Some(&Value::int(8)));
+        *actor
+            .query_handlers
+            .entry("extra".to_string())
+            .or_insert(Value::int(0)) = Value::int(11);
+        assert_eq!(actor.query_handlers.get("extra"), Some(&Value::int(11)));
 
         // Pooling must not leak query handlers across actor identities, nor
         // retain their backing allocation after it is no longer needed.
