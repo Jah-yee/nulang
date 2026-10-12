@@ -169,6 +169,7 @@ Examples:
   bookkeeping (message admission, foreign-count bump, coordinator submission,
   cycle-edge registration, and ready publication), excluding handler execution
   and pending-op draining.
+- `gc/orca_receiver_hold/{repeated,distinct}/256` runs 256 real pointer messages through receive, ORCA GC-op draining and receiver hold registration. The repeated case shares one object; the distinct case uses 256 objects. These are end-to-end admission/dispatch/reclamation-bookkeeping costs, not a standalone hash table benchmark. Compare both workloads in same-host paired runs before claiming a win.
 - `dist/crdt_delta_compute` and `dist/gossip_membership_merge_4` are local
   algorithmic microbenchmarks, not network synchronization/convergence.
 - `dist/nul0_actor_message_{encode,decode}/*` measures wire codec work only,
