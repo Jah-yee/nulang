@@ -182,6 +182,40 @@ fn my_tests() {
 
 ---
 
+## Module: bytes (Experimental)
+
+Binary-safe conversion and strict hexadecimal encoding. Import with
+`import stdlib::bytes`. The representation is presently `[Int]`, with each
+element required to be in the inclusive range 0..255. This is an **in-memory
+codec**, not a Go-style streaming `io.Reader`/`io.Writer` or a native byte
+buffer. Avoid interpreting arbitrary byte sequences as UTF-8 without validation.
+
+| Function | Signature | Behavior |
+|---|---|---|
+| `from_utf8` | `String -> [Int]` | Copy the raw UTF-8 octets of a string. |
+| `encode_hex` | `[Int] -> Result[String, ByteError]` | Lowercase hex; reject out-of-range octets. |
+| `decode_hex` | `String -> Result[[Int], ByteError]` | Decode both hex cases; reject odd length and invalid digits. |
+
+Errors are `OddHexLength`, `InvalidHexDigit(byte_offset)`, and
+`InvalidByte(value)`. No partial success is returned on invalid input.
+
+The current `Array.push` path copies on append, so converting long strings or
+large hex payloads can incur quadratic work. Prefer bounded inputs until an
+ownership-safe array builder is available; streaming codecs and binary host I/O
+must be implemented separately.
+
+### Example
+
+```nula
+import stdlib::bytes
+
+let raw = from_utf8("hello")
+let encoded = encode_hex(raw) // Ok("68656c6c6f")
+let decoded = decode_hex("48656C6C6F") // Ok([72, 101, 108, 108, 111])
+```
+
+---
+
 ## Module: fs
 
 Filesystem I/O via the built-in `FS` effect. Operations are `perform FS.read`,
