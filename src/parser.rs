@@ -7003,6 +7003,19 @@ mod tests {
     }
 
     #[test]
+    fn test_experimental_open_record_grammar_fixtures() {
+        let positive = include_str!("../conformance/grammar/positive_open_record_annotations.nula");
+        parse(positive).expect("open-record positive grammar fixture should parse");
+
+        for negative in [
+            include_str!("../conformance/grammar/negative_open_record_tail_not_last.nula"),
+            include_str!("../conformance/grammar/negative_open_record_duplicate_tail.nula"),
+        ] {
+            assert!(parse(negative).is_err(), "malformed row tail should not parse");
+        }
+    }
+
+    #[test]
     fn test_parse_open_record_tail_must_be_last() {
         let err = parse("fn get_x(p: { .., x: Int }) -> Int { p.x }")
             .expect_err("row tail before fields must be rejected");
