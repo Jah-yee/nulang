@@ -1,6 +1,8 @@
 // Durable job checkpoint demo: run with the reference bytecode VM.
-// The runner sets DEMO_PHASE=prepare or resume, and starts a new process
-// against the same JSON persistence store for each phase.
+// The first process prepares a checkpoint, then blocks on stdin while the
+// Python harness SIGKILLs it. Fresh processes select the recovery path from
+// persisted actor state; the actor-backed VM does not yet handle Env.get,
+// System.arg, or FS.read.
 persistent actor DemoJob {
     state durable stage: Int = 0
     state durable completions: Int = 0
@@ -23,21 +25,19 @@ persistent actor DemoJob {
 }
 
 fn main() {
-    // Preserve actor spawn order and declaration across restarts; the current
-    // CLI persistence implementation uses deterministic process-local actor ids.
+    // Spawn order is deliberately identical across process restarts.
     let job = spawn DemoJob {}
-    let mode = perform Env.get("DEMO_PHASE")
-    if mode == "prepare" then {
+    let stage = ask job get_stage()
+    let completions = ask job get_completions()
+    if stage == 0 then {
         ask job prepare()
-        let stage = ask job get_stage()
-        let completions = ask job get_completions()
-        perform IO.print("PREPARED=" + perform Int.to_string(stage) + ":" + perform Int.to_string(completions))
-        // This FIFO has no writer. The harness SIGKILLs the process here,
-        // after the actor checkpoint and acknowledgment, before completion.
-        perform FS.read("gate.fifo")
+        let after_stage = ask job get_stage()
+        let after_completions = ask job get_completions()
+        perform IO.print("PREPARED=" + perform Int.to_string(after_stage) + ":" + perform Int.to_string(after_completions))
+        // An open stdin pipe blocks until the harness sends SIGKILL.
+        // The checkpoint and read-back have already completed.
+        perform IO.read()
     } else {
-        let stage = ask job get_stage()
-        let completions = ask job get_completions()
         perform IO.print("RECOVERED=" + perform Int.to_string(stage) + ":" + perform Int.to_string(completions))
         ask job complete()
         let after_stage = ask job get_stage()
