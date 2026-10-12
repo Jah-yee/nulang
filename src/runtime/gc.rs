@@ -42,6 +42,7 @@
 //! valid and that no data races occur when multiple actors access the same object.
 
 use crate::runtime::heap::{OrcaHeader, TypeTag};
+use std::collections::HashSet;
 
 // ---------------------------------------------------------------------------
 // OrcaHeap trait
@@ -203,7 +204,7 @@ pub struct OrcaGc {
     /// Every hold keeps the object's `foreign_count` elevated by one, so
     /// the object (and, if the owner has exited, its retired heap) stays
     /// alive until the runtime releases the hold when this actor exits.
-    held_foreign_refs: Vec<(u64, *mut OrcaHeader)>,
+    held_foreign_refs: HashSet<(u64, *mut OrcaHeader)>,
     /// Per-actor statistics.
     stats: GcStats,
 }
@@ -217,7 +218,7 @@ impl OrcaGc {
             actor_id,
             deferred_decrements: Vec::new(),
             foreign_ref_queue: Vec::new(),
-            held_foreign_refs: Vec::new(),
+            held_foreign_refs: HashSet::new(),
             stats: GcStats::default(),
         }
     }
@@ -438,8 +439,8 @@ impl OrcaGc {
     /// (via the owner's [`inc_foreign_hold`](Self::inc_foreign_hold) or a
     /// direct header bump for a retired owner heap).  Holds are released
     /// by the runtime when this actor exits.
-    pub fn record_held_ref(&mut self, owner_actor: u64, object_header: *mut OrcaHeader) {
-        self.held_foreign_refs.push((owner_actor, object_header));
+    pub fn record_held_ref(&mut self, owner_actor: u64, object_header: *mut OrcaHeader) -> bool {
+        self.held_foreign_refs.insert((owner_actor, object_header))
     }
 
     /// Drain the list of foreign references this actor holds.
@@ -448,7 +449,7 @@ impl OrcaGc {
     /// foreign-count decrement for each entry on the owning side.  Draining
     /// makes a repeated call a no-op, so exit handling can be idempotent.
     pub fn take_held_refs(&mut self) -> Vec<(u64, *mut OrcaHeader)> {
-        std::mem::take(&mut self.held_foreign_refs)
+        std::mem::take(&mut self.held_foreign_refs).into_iter().collect()
     }
 
     /// Process a foreign ref operation delivered from another actor.
