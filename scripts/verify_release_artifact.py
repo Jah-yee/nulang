@@ -98,7 +98,20 @@ def verify_artifact(
                 raise VerificationError(
                     f"packaged CLI could not run ({' '.join(args)}): {exc}"
                 ) from exc
-            if result.returncode != 0 or expected not in result.stdout:
+            if args[0] == "--version":
+                # A substring would accept the wrong binary, e.g. version
+                # 0.1.0 appearing inside 10.1.0 or 0.1.0-debug.
+                # The CLI may print a second "language ..." metadata line.
+                version_lines = [line.strip().split() for line in result.stdout.splitlines()]
+                output_valid = any(
+                    len(fields) == 2
+                    and fields[0].casefold() == "nulang"
+                    and fields[1] == version
+                    for fields in version_lines
+                )
+            else:
+                output_valid = expected in result.stdout
+            if result.returncode != 0 or not output_valid:
                 raise VerificationError(
                     f"packaged CLI failed {' '.join(args)}: "
                     f"exit={result.returncode}; stdout={result.stdout[:400]!r}; "
