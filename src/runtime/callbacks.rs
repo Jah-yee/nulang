@@ -2594,6 +2594,27 @@ impl crate::vm::DistributedVmCallbacks for BytecodeDistributedCallbacks {
 }
 
 #[cfg(test)]
+mod remote_spawn_failure_contract_tests {
+    use super::BytecodeDistributedCallbacks;
+    use crate::runtime::Runtime;
+    use crate::vm::DistributedVmCallbacks;
+
+    #[test]
+    fn unavailable_distributed_runtime_cannot_fabricate_actor_identity() {
+        let mut runtime = Runtime::new();
+        let mut callbacks = BytecodeDistributedCallbacks {
+            runtime: &mut runtime as *mut Runtime,
+        };
+
+        let result = callbacks.remote_spawn(42, "Worker", &[]);
+        assert!(result.is_nil(), "unconfigured transport, cluster or resolver must return nil");
+        assert!(runtime.distributed.transport.is_none());
+        assert!(runtime.distributed.cluster.is_none());
+        assert!(runtime.distributed.resolver.is_none());
+    }
+}
+
+#[cfg(test)]
 mod migration_authority_tests {
     use super::{migration_authority_tokens, next_migration_activation_epoch};
     use crate::authority::AuthorityManifest;
