@@ -34,7 +34,7 @@ impl TokenUsage {
         Self {
             prompt,
             completion,
-            total: prompt + completion,
+            total: prompt.saturating_add(completion),
         }
     }
 }
