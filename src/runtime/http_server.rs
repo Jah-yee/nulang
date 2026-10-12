@@ -1106,6 +1106,39 @@ fn guess_content_type(path: &Path) -> &'static str {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "otel")]
+    #[test]
+    fn http_ingress_uses_remote_traceparent_as_real_otel_parent() {
+        use opentelemetry::trace::{TraceContextExt as _, TracerProvider as _};
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+        use tracing_subscriber::prelude::*;
+
+        let provider = opentelemetry_sdk::trace::TracerProvider::builder().build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("http-ingress-test")));
+        tracing::subscriber::with_default(subscriber, || {
+            let request = HttpRequest {
+                method: HttpMethod::Get,
+                path: "/users/42?token=hidden".to_string(),
+                headers: vec![(
+                    "TrAcEpArEnT".to_string(),
+                    "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+                        .to_string(),
+                )],
+                body: Vec::new(),
+            };
+            let _entered = enter_http_request_span(&request)
+                .expect("enabled TRACE level has a request span");
+            let active = tracing::Span::current().context();
+            let span = active.span();
+            let ctx = span.span_context();
+            assert!(ctx.is_valid());
+            assert_eq!(ctx.trace_id().to_bytes(),
+                0x4bf92f3577b34da6a3ce929d0e0e4736u128.to_be_bytes());
+            assert_ne!(ctx.span_id().to_bytes(), 0x00f067aa0ba902b7u64.to_be_bytes());
+        });
+    }
+
     #[test]
     fn test_match_route_exact() {
         let params = match_route("/", "/").unwrap();
