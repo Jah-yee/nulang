@@ -52,6 +52,17 @@ fn next_migration_activation_epoch(current: u64) -> Option<u64> {
     current.checked_add(1)
 }
 
+/// Turn a locally spawned actor or live remote-spawn placeholder into a VM
+/// reference, but never allow the reserved zero ID to appear as success.
+fn actor_ref_for_spawn_address(address: ActorAddress) -> crate::vm::Value {
+    let actor_id = address.actor_id();
+    if actor_id == 0 {
+        crate::vm::Value::nil()
+    } else {
+        crate::vm::Value::actor_ref(actor_id)
+    }
+}
+
 pub(crate) fn spawn_with_site_authority(
     rt: &mut Runtime,
     module: &crate::bytecode::CodeModule,
@@ -2578,7 +2589,7 @@ impl crate::vm::DistributedVmCallbacks for BytecodeDistributedCallbacks {
                 (&mut transport, &cluster, &mut resolver)
             {
                 let addr = spawn_on_node(rt, t, c, r, node, behavior, init.to_vec());
-                crate::vm::Value::actor_ref(addr.actor_id())
+                actor_ref_for_spawn_address(addr)
             } else {
                 // Missing transport, cluster or resolver is a failed spawn, not
                 // an actor with the reserved id zero.
@@ -2603,14 +2614,12 @@ mod remote_spawn_failure_contract_tests {
 
     #[test]
     fn zero_actor_address_is_not_an_admitted_spawn() {
-        let value = super::actor_ref_for_spawn_address(
-            super::ActorAddress::local(0),
-        );
+        let invalid = super::ActorAddress::local(0);
+        let value = super::actor_ref_for_spawn_address(invalid);
         assert!(value.is_nil(), "reserved actor id zero must never be a spawn success");
 
-        let valid = super::actor_ref_for_spawn_address(
-            super::ActorAddress::remote(super::NodeId(42), 73),
-        );
+        let pending = super::ActorAddress::remote(super::NodeId(42), 73);
+        let valid = super::actor_ref_for_spawn_address(pending);
         assert_eq!(valid.as_actor_id(), Some(73));
     }
 
