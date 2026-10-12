@@ -53,10 +53,27 @@ def build_command() -> list[str]:
 
 def read_means(criterion_dir: Path) -> dict[str, float]:
     rows = shared.collect_means(criterion_dir)
-    missing = [name for name in BENCHMARKS if name not in rows]
+    means: dict[str, float] = {}
+    missing: list[str] = []
+    for name in BENCHMARKS:
+        group, parameter = name.rsplit("/", 1)
+        # Criterion 0.5 sanitizes slash characters inside a *group ID* to
+        # underscores when constructing paths, but retains the '/' separator
+        # before its parameter. Benchmark display names remain unchanged.
+        directory_name = f"{group.replace('/', '_')}/{parameter}"
+        candidates = dict.fromkeys((name, directory_name))
+        found = [key for key in candidates if key in rows]
+        if len(found) > 1:
+            raise RuntimeError(f"ambiguous Criterion output for {name}: {found}")
+        if not found:
+            missing.append(name)
+            continue
+        means[name] = rows[found[0]]
     if missing:
-        raise RuntimeError("missing Criterion results for " + ", ".join(missing))
-    means = {name: rows[name] for name in BENCHMARKS}
+        raise RuntimeError(
+            "missing Criterion results for " + ", ".join(missing)
+            + "; available result paths: " + repr(sorted(rows))
+        )
     if any(not math.isfinite(value) or value <= 0 for value in means.values()):
         raise RuntimeError("Criterion means must be positive and finite")
     return means
