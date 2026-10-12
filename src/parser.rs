@@ -7942,6 +7942,36 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_keyword_effect_operation_in_declaration_and_handlers() {
+        // Effect declarations and both handler syntaxes must use the same
+        // operation-name grammar as perform; import remains reserved elsewhere.
+        let declaration = parse("effect Python { import: (String) -> Unit }").unwrap();
+        match &declaration.decls[0] {
+            Decl::EffectDecl { ops, .. } => assert_eq!(ops[0].0, "import"),
+            other => panic!("Expected effect declaration, got {:?}", other),
+        }
+
+        let named = parse("handler py = { | Python.import(name) resume => name }").unwrap();
+        match &named.decls[0] {
+            Decl::NamedHandler { handlers, .. } => {
+                assert_eq!(handlers[0].op_name, "import");
+            }
+            other => panic!("Expected named handler, got {:?}", other),
+        }
+
+        let inline = parse_expr(
+            "handle perform Python.import(\"math\") { | Python.import(name) resume => name }",
+        )
+        .unwrap();
+        match inline {
+            Expr::Handle { handlers, .. } => {
+                assert_eq!(handlers[0].op_name, "import");
+            }
+            other => panic!("Expected inline handler, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_parse_perform_keyword_ops() {
         // `link`, `monitor` and `exit` are reserved keywords; they must still
         // parse as effect operation names (BEAM Actor.* builtin effects).
