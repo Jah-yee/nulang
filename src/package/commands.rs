@@ -1947,7 +1947,12 @@ fn strip_main_function(source: &str) -> String {
     };
     let significant: Vec<_> = tokens
         .iter()
-        .filter(|t| !matches!(&t.kind, TokenKind::Newline | TokenKind::DocComment(_) | TokenKind::Eof))
+        .filter(|t| {
+            !matches!(
+                &t.kind,
+                TokenKind::Newline | TokenKind::DocComment(_) | TokenKind::Eof
+            )
+        })
         .collect();
     for (i, tokens) in significant.windows(5).enumerate() {
         if !matches!(&tokens[0].kind, TokenKind::Fn)
@@ -1979,6 +1984,7 @@ fn strip_main_function(source: &str) -> String {
     }
     source.to_owned()
 }
+
 /// Run a test file via `nulang`, capturing stderr so error messages appear
 /// after the test name (avoiding interleaved output).
 /// Returns `Ok(())` on success, `Err(stderr_string)` on failure.
