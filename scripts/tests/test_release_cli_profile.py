@@ -49,5 +49,16 @@ class ReleaseCliProfileTests(unittest.TestCase):
         )
 
 
+    def test_linux_arm64_release_installs_libc_headers_and_probes_cross_compiler(self):
+        """Cross GCC must find target stdint.h before the costly Rust build."""
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        setup = workflow.split(
+            "      - name: Install cross-compilation toolchain (Linux aarch64)\n", 1
+        )[1].split("      - name: Install macOS system dependencies\n", 1)[0]
+        self.assertIn("libc6-dev-arm64-cross", setup)
+        self.assertIn("aarch64-linux-gnu-gcc -x c -c -", setup)
+        self.assertIn("#include <stdint.h>", setup)
+
+
 if __name__ == "__main__":
     unittest.main()
