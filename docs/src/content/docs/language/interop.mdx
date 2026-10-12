@@ -95,7 +95,7 @@ fn main() {
 ```
 
 :::note
-Current state of this surface, verified with the compiler binary: The parser now accepts `perform Python.import(...)` even though `import` is a reserved keyword. This resolves the source-level parse blocker only; Python marshalling and actor-host dispatch are still experimental and require end-to-end verification. Do not assume Python calls are production-ready merely because the source parses. The bridge itself (import, call, attribute access, marshalling) is implemented and unit-tested at the Rust level; driving it end-to-end from source is blocked on the import syntax gap.
+Current state of this surface, verified with the compiler binary: The parser now accepts `perform Python.import(...)` even though `import` is a reserved keyword. This resolves the source-level parse blocker only; Python marshalling and actor-host dispatch are still experimental and require end-to-end verification. Do not assume Python calls are production-ready merely because the source parses. The bridge itself (import, call, attribute access, marshalling) has Rust unit coverage, but source-level integration still needs verification.
 :::
 
 ## The C FFI

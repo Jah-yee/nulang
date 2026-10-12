@@ -78,7 +78,7 @@ fn format_nulang_source(source: &str) -> String {
         let Some(text) = source.get(start..end) else {
             return source.to_string();
         };
-        if !matches!(token.kind, crate::lexer::TokenKind::Newline)
+        if !matches!(&token.kind, crate::lexer::TokenKind::Newline)
             && (text.contains('\n') || text.contains('\r'))
         {
             return source.to_string();

@@ -7949,7 +7949,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_parse_ask_timeout_literal_is_retained() {
         let expr = parse_expr("ask worker get() timeout 500").unwrap();
