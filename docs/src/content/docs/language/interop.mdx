@@ -102,6 +102,7 @@ grant. Importing a module alone does not resolve the string-marshalling
 limitations above: treat the Python bridge as Experimental, and verify
 the exact functions and value types used by your application.
 :::
+
 ## The C FFI
 
 The FFI has three faces, all in `src/ffi/` behind the default-on `ffi` cargo feature (libloading + libffi): language-level `extern` blocks, dynamic library loading, and a stable C embedder API. There are no user-facing `FFI.*` effect operations in the stdlib registry — the surface is the `extern` syntax plus host registration APIs. This is lower-level and less polished than the rest of the language; treat it as experimental infrastructure.
