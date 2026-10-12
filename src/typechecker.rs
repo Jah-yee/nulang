@@ -5751,6 +5751,26 @@ mod tests {
         assert!(result.is_ok(), "expected success, got {:?}", result.err());
     }
 
+
+    #[test]
+    fn test_explicit_open_record_accepts_additional_fields() {
+        let src = "fn get_x(p: { x: Int, .. }) -> Int { p.x }\nget_x({ x: 7, y: 42 })";
+        let result = check_src(src);
+        assert!(result.is_ok(), "open record should accept extra fields: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_explicit_open_record_requires_declared_field() {
+        let src = "fn get_x(p: { x: Int, .. }) -> Int { p.x }\nget_x({ y: 42 })";
+        assert!(check_src(src).is_err(), "open record should require x");
+    }
+
+    #[test]
+    fn test_closed_record_still_rejects_additional_fields() {
+        let src = "fn get_x(p: { x: Int }) -> Int { p.x }\nget_x({ x: 7, y: 42 })";
+        assert!(check_src(src).is_err(), "closed records must remain exact");
+    }
+
     #[test]
     fn test_same_row_var_record_unify_populates_structured_fields() {
         // Two open records sharing the SAME row variable but demanding
