@@ -1,6 +1,6 @@
 ---
 title: Nulang for AI Coding Agents
-description: A practical, verifiable guide for coding agents using Nulang: authoritative references, supported execution targets, CLI checks, testing, and feature maturity.
+description: "A practical, verifiable guide for coding agents using Nulang: authoritative references, supported execution targets, CLI checks, testing, and feature maturity."
 ---
 
 This page is for **AI coding assistants that write or modify Nulang programs**. If you are building LLM-powered agents *in* Nulang, start with the [experimental AI runtime](/ai/overview/) instead.
