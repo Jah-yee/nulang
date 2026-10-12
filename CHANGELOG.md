@@ -1,5 +1,10 @@
 # Nulang Changelog
 
+### Matched Erlang/OTP gen_server actor benchmarks — 2026-10-12
+- **An opt-in `erlang_otp` cross-runtime fixture measures real OTP generic-server actor dispatch.** Counting, ping-pong, thread-ring, and fork-join execute the existing logical-message contracts via `gen_server:cast`, leaving standard Rust/Go/BEAM baselines unchanged.
+- **Cross-runtime reporting rejects invalid benchmark records before summarizing them.** Duplicate workloads, non-positive timing, inconsistent workload message counts, and duplicate selected runtimes fail closed; ten Python contract tests are run by the comparison workflow.
+- **CI includes the OTP fixture in cross-runtime artifacts but does not imply an actor-framework speed claim.** Every comparative number still requires a successful same-host run and explicit interpretation of shared-runner noise and unmatched scheduling semantics.
+
 ### Runtime soundness and checked negation — native/AOT backend parity — 2026-10-10
 - **AOT no longer claims raw-Int/Float registers for values that can be nil
   at runtime.** Nightly differential fuzz caught interpreter/AOT divergences
