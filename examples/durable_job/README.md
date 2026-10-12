@@ -5,17 +5,17 @@ This is a *single persistent actor state-machine* demonstration on the **native 
 
 ## Prerequisites
 
-- Linux or macOS with POSIX named pipes (`mkfifo`) and `SIGKILL`.
+- Linux or macOS with POSIX `SIGKILL` and standard input pipes.
 - Python 3.10+ (stdlib only) to run the verification harness and SQLite baseline.
 - A full-featured `nulang` CLI binary built for your platform (for example, `target/release/nulang`). The browser playground and WASM backend do not execute this demo.
-- The checkpoint-gate implementation reads a local FIFO with `FS.read`. Nulang explicitly requires `--with fs` for this effect; the harness passes only that capability (no broad permission grant).
+- The checkpoint-gate implementation blocks on standard input with `IO.read` after the durable state is read back. No filesystem or OS capability grant is needed for the application.
 
 From the repository root:
 
 ~~~bash
 python3 -m unittest discover -s examples/durable_job -p 'test_*.py'
 python3 examples/durable_job/run_demo.py --baseline-only
-./target/release/nulang --with fs --check examples/durable_job/job.nula
+./target/release/nulang --check examples/durable_job/job.nula
 python3 examples/durable_job/run_demo.py --nulang-bin ./target/release/nulang
 ~~~
 
@@ -27,17 +27,17 @@ One job starts with `(stage=0, completions=0)`. Both implementations use the sam
 
 | Process | Action | Assertion |
 | --- | --- | --- |
-| A | Persist `stage=1`, acknowledge, then block on a local FIFO; harness sends **SIGKILL** | `PREPARED=1:0` observed and process actually terminated by signal |
+| A | Persist `stage=1`, acknowledge, then block on an open stdin pipe; harness sends **SIGKILL** | `PREPARED=1:0` observed and process actually terminated by signal |
 | B | Start a **fresh** process with the same store and actor definition; complete once | `RECOVERED=1:0`, then `COMPLETED=2:1` |
 | C | Start a second fresh process with the same store; request completion again | `RECOVERED=2:1`, then `COMPLETED=2:1` |
 
 The assertion on the *read-back after a new process* is essential: merely printing a checkpoint marker in process A does not prove the state was durable. An intentionally broken mock runner that forgets state is rejected by `test_runner.py`.
 
-The FIFO is a deterministic **failure gate**, not a durable timer or a communication mechanism in the workload itself. The test kills the process after a successful actor request and read-back. It does **not** crash during a storage commit, simultaneous writers, or an external side effect.
+The open stdin pipe is a deterministic **failure gate**, not a durable timer or a workload communication mechanism. The test kills the process after a successful actor request and read-back. It does **not** crash during a storage commit, simultaneous writers, or an external side effect.
 
 ### Nulang implementation
 
-[`job.nula`](job.nula) defines a `persistent actor DemoJob` with two `state durable` integer fields. The state machine rejects duplicate transitions through explicit `if` checks. The CLI is invoked with `--backend bytecode --store json:<tempdir>`.
+[`job.nula`](job.nula) defines a `persistent actor DemoJob` with two `state durable` integer fields. The state machine rejects duplicate transitions through explicit `if` checks. The CLI is invoked with `--backend bytecode --store json:<tempdir>`. The first process selects `prepare` when recovered `stage == 0`; subsequent runs select `resume` using persisted stage. This avoids unhandled `Env.get`, `System.arg`, and `FS.read` effects on the current actor-backed VM.
 
 **Known limitation:** Nulang's present CLI restart mechanism recreates process-local numeric actor IDs deterministically; this demonstration intentionally spawns one actor in the same order each run. This is not a general stable business-key/virtual-actor identity guarantee. Do not extend it to concurrent runs sharing the JSON directory or to renamed/reordered actor spawns without new migration and ownership tests.
 
