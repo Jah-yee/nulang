@@ -7940,6 +7940,50 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn test_parse_ask_timeout_literal_is_retained() {
+        let expr = parse_expr("ask worker get() timeout 500").unwrap();
+        match expr {
+            Expr::Ask { timeout_ms, .. } => assert_eq!(timeout_ms, Some(500)),
+            other => panic!("Expected Ask expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_ask_timeout_rejects_unsupported_values() {
+        for source in [
+            "ask worker get() timeout delay",
+            "ask worker get() timeout 100 + 50",
+            "ask worker get() timeout -1",
+        ] {
+            let err = parse_expr(source).expect_err("nonliteral or negative timeout must fail");
+            assert!(
+                format!("{:?}", err).contains("non-negative integer literal"),
+                "{} should explain the supported timeout syntax: {:?}",
+                source,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_perform_reserved_keyword_operation_names() {
+        for (source, effect, op) in [
+            ("perform Python.import(\"math\")", "Python", "import"),
+            ("perform Actor.link(worker)", "Actor", "link"),
+        ] {
+            let expr = parse_expr(source).unwrap();
+            match expr {
+                Expr::Perform { effect: got_effect, op: got_op, .. } => {
+                    assert_eq!(got_effect, effect);
+                    assert_eq!(got_op, op);
+                }
+                other => panic!("Expected Perform expression, got {:?}", other),
+            }
+        }
+    }
+
     #[test]
     fn test_parse_type_annotation() {
         let expr = parse_expr("(x : Int)").unwrap();

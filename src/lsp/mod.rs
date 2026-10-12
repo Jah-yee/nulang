@@ -4708,4 +4708,27 @@ mod lsp_tests {
             "expected cached inlay hint with Int type"
         );
     }
+
+    #[test]
+    fn test_format_ignores_braces_in_strings_and_comments() {
+        let source = "fn main() {\n    perform IO.print(\"{\")\n    // } should not close a block\n    perform IO.print(\"ok\")\n}\n";
+        assert_eq!(format_nulang_source(source), source);
+    }
+
+    #[test]
+    fn test_format_nested_blocks_and_is_idempotent() {
+        let source = "fn main() {\nif true {\nperform IO.print(\"ok\")\n}\n}\n";
+        let expected = "fn main() {\n    if true {\n        perform IO.print(\"ok\")\n    }\n}\n";
+        assert_eq!(format_nulang_source(source), expected);
+        assert_eq!(format_nulang_source(expected), expected);
+    }
+
+    #[test]
+    fn test_format_preserves_multiline_literals_and_invalid_input() {
+        let multiline = "fn main() {\n    let text = \"\"\"{\nraw\n}\"\"\"\n}\n";
+        assert_eq!(format_nulang_source(multiline), multiline);
+        let invalid = "fn main() {\n    let text = \"unterminated\n";
+        assert_eq!(format_nulang_source(invalid), invalid);
+    }
+
 }
