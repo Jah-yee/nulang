@@ -1,5 +1,9 @@
 # Nulang Changelog
 
+### Event-driven distributed TCP packet wakeups — 2026-10-12
+- **Distributed node loops wake on inbound packets instead of always sleeping for 10 ms.** TCP transports wait on their inbound channel and stage the wakeup packet for the following receive pass, preserving FIFO delivery and exactly-once consumption at the runtime boundary.
+- **Maintenance remains bounded to 10 ms.** Timers, asynchronous transport failures, and custom transports without a notification mechanism retain their existing periodic maintenance opportunities. TCP idle wakeup behavior is covered by focused regression tests; end-to-end network latency improvement is not yet independently quantified.
+
 ### Runtime soundness and checked negation — native/AOT backend parity — 2026-10-10
 - **AOT no longer claims raw-Int/Float registers for values that can be nil
   at runtime.** Nightly differential fuzz caught interpreter/AOT divergences
