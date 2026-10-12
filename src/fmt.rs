@@ -1269,8 +1269,14 @@ mod tests {
     fn test_fmt_rejects_losing_regular_and_doc_comments() {
         let regular = "fn main() {\n  // keep this explanation\n  perform IO.print(\"hello\")\n}\n";
         let documented = "/// important API docs\nfn greet() { 1 }\n";
-        assert!(format_source(regular).is_err(), "comments must never be dropped");
-        assert!(format_source(documented).is_err(), "doc comments must never be dropped");
+        assert!(
+            format_source(regular).is_err(),
+            "comments must never be dropped"
+        );
+        assert!(
+            format_source(documented).is_err(),
+            "doc comments must never be dropped"
+        );
     }
 
     #[test]
@@ -1281,7 +1287,6 @@ mod tests {
             "formatting must not silently remove parameter defaults"
         );
     }
-
 
     /// Formatting must be idempotent: formatting the formatted output is a
     /// no-op (returns the same text), so repeated `fmt` runs converge.
