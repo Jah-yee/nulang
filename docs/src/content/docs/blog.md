@@ -3,7 +3,6 @@ title: Why Nulang? Typed Actors and Durable Execution
 description: Why Nulang combines typed effects, actor supervision, persistent state, and experimental distribution in one language and runtime.
 ---
 
-# Why Nulang?
 
 Nulang explores a particular software architecture: **typed actors, explicit effects, supervision and opt-in durable state** as parts of the same programming language and runtime. Instead of bolting failure recovery and actor state onto ordinary service code, the aim is to make their contracts inspectable and testable.
 
