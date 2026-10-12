@@ -45,7 +45,7 @@ class CrossShardCriterionABTests(unittest.TestCase):
 
     def test_criterion_command_runs_only_new_shard_group(self) -> None:
         cmd = ab.bench_command()
-        self.assertEqual(cmd[:5], ["cargo", "bench", "--locked", "--bench", "actor_bench"])
+        self.assertEqual(cmd[:5], ["cargo", "bench", "--locked", "--bench", "bench_main"])
         self.assertIn("actor/cross_shard_enqueue_by_id", cmd)
 
 
