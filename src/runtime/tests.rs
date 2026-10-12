@@ -7843,10 +7843,17 @@ fn test_cross_shard_numeric_send_preserves_inline_payload_and_fifo_delivery() {
         target = shards[1].spawn_actor(Box::new(|| vec![]));
     }
 
-    // Cover both sides of the 4-Value inline boundary, including empty sends.
-    for len in [0usize, 1, 4, 5] {
-        let values: Vec<Value> = (0..len).map(|i| Value::int(i as i64)).collect();
-        shards[0].send_message_by_id(target, 0, &values);
+    // Queue all four payloads before consuming any, so this also verifies
+    // the FIFO path across the shard channel and destination mailbox.
+    let expected: Vec<Vec<Value>> = [0usize, 1, 4, 5]
+        .iter()
+        .map(|&len| (0..len).map(|i| Value::int(i as i64)).collect())
+        .collect();
+    for values in &expected {
+        shards[0].send_message_by_id(target, 0, values);
+    }
+
+    for values in &expected {
         let packet = shards[1]
             .cross_shard_rx
             .as_ref()
@@ -7866,7 +7873,7 @@ fn test_cross_shard_numeric_send_preserves_inline_payload_and_fifo_delivery() {
             } => {
                 assert_eq!(target_id, target);
                 assert_eq!(payload.as_slice(), values.as_slice());
-                assert_eq!(payload.is_inline(), len <= 4);
+                assert_eq!(payload.is_inline(), values.len() <= 4);
                 shards[1].deliver_cross_shard_message(
                     target_id,
                     behavior_id,
@@ -7879,6 +7886,9 @@ fn test_cross_shard_numeric_send_preserves_inline_payload_and_fifo_delivery() {
             }
             other => panic!("expected numeric cross-shard delivery: {other:?}"),
         }
+    }
+
+    for values in &expected {
         let received = shards[1]
             .actors
             .get_mut(&target)
@@ -7887,8 +7897,12 @@ fn test_cross_shard_numeric_send_preserves_inline_payload_and_fifo_delivery() {
             .pop()
             .expect("target mailbox must receive the payload");
         assert_eq!(received.payload.as_slice(), values.as_slice());
-        assert_eq!(received.payload.is_inline(), len <= 4);
+        assert_eq!(received.payload.is_inline(), values.len() <= 4);
     }
+    assert!(
+        shards[1].actors.get(&target).unwrap().mailbox.is_empty(),
+        "cross-shard FIFO must not introduce duplicate deliveries"
+    );
 }
 
 #[test]
