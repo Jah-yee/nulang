@@ -58,10 +58,10 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             artifact: nulang-linux-x86_64
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: aarch64-unknown-linux-gnu
             artifact: nulang-linux-aarch64
           - os: macos-latest
@@ -203,6 +203,24 @@ jobs:
             args+=(--no-execute)
           fi
           "$PYTHON" scripts/verify_release_artifact.py "${args[@]}"
+
+      # Proves the packaged binary starts without the build runner's SDK,
+      # Python development headers, or other ambient host libraries.
+      - name: Linux x86_64 clean-runtime compatibility
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          docker run --rm --network bridge \
+            --mount "type=bind,source=${PWD}/dist,target=/release,readonly" \
+            ubuntu:24.04 bash -euc '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y -qq --no-install-recommends libpython3.12 libssl3t64 >/dev/null
+              mkdir -p /tmp/cli
+              tar -xzf /release/nulang-linux-x86_64.tar.gz -C /tmp/cli
+              /tmp/cli/nulang-linux-x86_64 --version
+              /tmp/cli/nulang-linux-x86_64 --eval '\''perform IO.print("release smoke ok")'\''
+            '
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
