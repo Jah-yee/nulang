@@ -153,7 +153,7 @@ export default defineConfig({
           label: 'Why Nulang?',
           collapsed: false,
           items: [
-            { label: 'Comparisons & Philosophy', link: 'blog/' },
+            { label: 'Language Comparisons & Tradeoffs', link: 'blog/' }
           ],
         },
         {
