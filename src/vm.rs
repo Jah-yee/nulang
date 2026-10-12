@@ -8996,3 +8996,35 @@ mod vm_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod utf8_substring_boundary_tests {
+    use super::utf8_substring_by_bytes;
+
+    #[test]
+    fn preserves_existing_byte_offset_semantics() {
+        assert_eq!(utf8_substring_by_bytes("abcdef", 1, 3), Some("bcd"));
+        assert_eq!(utf8_substring_by_bytes("hé💡", 1, 2), Some("é"));
+        assert_eq!(utf8_substring_by_bytes("hé", 1, 100), Some("é"));
+        assert_eq!(utf8_substring_by_bytes("hé", 3, 0), Some(""));
+    }
+
+    #[test]
+    fn rejects_split_codepoints_instead_of_panicking() {
+        assert_eq!(utf8_substring_by_bytes("é", 0, 1), None);
+        assert_eq!(utf8_substring_by_bytes("é", 1, 1), None);
+        assert_eq!(utf8_substring_by_bytes("💡", 0, 2), None);
+        assert_eq!(utf8_substring_by_bytes("a💡b", 2, 1), None);
+    }
+
+    #[test]
+    fn handles_negative_and_oversized_offsets_without_overflow() {
+        assert_eq!(utf8_substring_by_bytes("abc", -1, 1), None);
+        assert_eq!(utf8_substring_by_bytes("abc", 0, -1), None);
+        assert_eq!(utf8_substring_by_bytes("abc", i64::MAX, 1), None);
+        assert_eq!(
+            utf8_substring_by_bytes("abc", 1, i64::MAX),
+            Some("bc")
+        );
+    }
+}
