@@ -2384,7 +2384,8 @@ impl Runtime {
                 return MessageAdmission::Rejected;
             }
         }
-        let Some(object_holds) = ObjectRefLease::acquire(&self.object_store, payload.as_slice()) else {
+        let Some(object_holds) = ObjectRefLease::acquire(&self.object_store, payload.as_slice())
+        else {
             warn!(
                 "nulang-shard: rejecting cross-shard message to actor {}: object ref not found",
                 target_id
