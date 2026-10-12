@@ -269,7 +269,9 @@ impl LazyQueryHandlers {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inner.as_ref().is_none_or(|handlers| handlers.is_empty())
+        self.inner
+            .as_ref()
+            .is_none_or(|handlers| handlers.is_empty())
     }
 
     pub fn len(&self) -> usize {
@@ -929,16 +931,23 @@ mod tests {
         assert_eq!(actor.query_handlers.get("health"), None);
         assert!(!actor.query_handlers.contains_key("health"));
         assert_eq!(actor.query_handlers.keys().count(), 0);
-        assert!(!actor.query_handlers.is_allocated(), "reads must not allocate");
+        assert!(
+            !actor.query_handlers.is_allocated(),
+            "reads must not allocate"
+        );
 
         assert_eq!(
-            actor.query_handlers.insert("health".to_string(), Value::int(7)),
+            actor
+                .query_handlers
+                .insert("health".to_string(), Value::int(7)),
             None
         );
         assert!(actor.query_handlers.is_allocated());
         assert_eq!(actor.query_handlers.get("health"), Some(&Value::int(7)));
         assert_eq!(
-            actor.query_handlers.insert("health".to_string(), Value::int(8)),
+            actor
+                .query_handlers
+                .insert("health".to_string(), Value::int(8)),
             Some(Value::int(7)),
             "overwriting should retain HashMap insertion semantics"
         );
