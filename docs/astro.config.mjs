@@ -153,6 +153,7 @@ export default defineConfig({
           label: 'Why Nulang?',
           collapsed: false,
           items: [
+            { label: 'Performance Benchmarks', link: 'benchmarks/' },
             { label: 'Comparisons & Philosophy', link: 'blog/' },
           ],
         },
