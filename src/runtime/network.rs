@@ -2010,6 +2010,16 @@ pub trait NetworkTransport: Send {
         TrackedSendOutcome::Unsupported
     }
     fn receive(&self) -> Vec<IncomingPacket>;
+    /// Wait until inbound transport work becomes available or the maintenance
+    /// timeout expires. The wait must not consume a packet: the following
+    /// `receive` call must still return it exactly once and in arrival order.
+    ///
+    /// Non-TCP/test transports retain the bounded sleep fallback so existing
+    /// custom NetworkTransport implementations stay source-compatible.
+    fn wait_for_activity(&self, timeout: std::time::Duration) -> bool {
+        std::thread::sleep(timeout);
+        false
+    }
     /// Drain asynchronous transport failures reported after a packet sequence
     /// was reserved. Transports without asynchronous failure reporting return
     /// an empty set.
@@ -2059,6 +2069,9 @@ impl NetworkTransport for Box<dyn NetworkTransport> {
     fn receive(&self) -> Vec<IncomingPacket> {
         (**self).receive()
     }
+    fn wait_for_activity(&self, timeout: std::time::Duration) -> bool {
+        (**self).wait_for_activity(timeout)
+    }
     fn drain_send_failures(&mut self) -> Vec<TransportSendFailure> {
         (**self).drain_send_failures()
     }
@@ -2098,6 +2111,10 @@ pub struct TcpTransport {
     connections: Arc<Mutex<HashMap<NodeId, TcpConnection>>>,
     /// Channel endpoint used to receive packets from other nodes.
     incoming_rx: mpsc::Receiver<IncomingPacket>,
+    /// One packet captured by the blocking idle wait and returned by the next
+    /// `receive`. Keeping it here preserves FIFO without changing the
+    /// public receive/processing boundary.
+    pending_incoming: Mutex<Option<IncomingPacket>>,
     /// Cloneable send side of the incoming channel, handed to reader
     /// threads spawned for dialled outbound connections.
     incoming_tx: mpsc::SyncSender<IncomingPacket>,
@@ -2196,6 +2213,7 @@ impl TcpTransport {
             listen_addr,
             connections,
             incoming_rx,
+            pending_incoming: Mutex::new(None),
             incoming_tx,
             outgoing_tx,
             send_failure_tx,
@@ -2376,6 +2394,9 @@ impl TcpTransport {
     /// Returns all packets that have arrived since the last call.
     pub fn receive(&self) -> Vec<IncomingPacket> {
         let mut packets = Vec::new();
+        if let Some(packet) = lock_ignore_poison(&self.pending_incoming).take() {
+            packets.push(packet);
+        }
         loop {
             match self.incoming_rx.try_recv() {
                 Ok(p) => packets.push(p),
@@ -2384,6 +2405,23 @@ impl TcpTransport {
             }
         }
         packets
+    }
+
+    /// Block on the same inbound channel used by TCP reader threads.
+    /// `recv_timeout` wakes as soon as a packet arrives, eliminating the
+    /// unconditional distributed-node 10ms latency floor. Stage the packet
+    /// so `receive` can handle it exactly once alongside later arrivals.
+    pub fn wait_for_activity(&self, timeout: Duration) -> bool {
+        if lock_ignore_poison(&self.pending_incoming).is_some() {
+            return true;
+        }
+        match self.incoming_rx.recv_timeout(timeout) {
+            Ok(packet) => {
+                *lock_ignore_poison(&self.pending_incoming) = Some(packet);
+                true
+            }
+            Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => false,
+        }
     }
 
     /// Get this node's ID.
@@ -4148,6 +4186,9 @@ impl NetworkTransport for TcpTransport {
     }
     fn receive(&self) -> Vec<IncomingPacket> {
         self.receive()
+    }
+    fn wait_for_activity(&self, timeout: std::time::Duration) -> bool {
+        TcpTransport::wait_for_activity(self, timeout)
     }
     fn drain_send_failures(&mut self) -> Vec<TransportSendFailure> {
         self.drain_send_failures()
