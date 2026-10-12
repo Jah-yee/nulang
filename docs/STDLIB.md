@@ -199,10 +199,11 @@ buffer. Avoid interpreting arbitrary byte sequences as UTF-8 without validation.
 Errors are `OddHexLength`, `InvalidHexDigit(byte_offset)`, and
 `InvalidByte(value)`. No partial success is returned on invalid input.
 
-The current `Array.push` path copies on append, so converting long strings or
-large hex payloads can incur quadratic work. Prefer bounded inputs until an
-ownership-safe array builder is available; streaming codecs and binary host I/O
-must be implemented separately.
+Octet extraction and hex decoding preallocate fixed-size integer arrays;
+encoding uses a growable string builder. This avoids copy-on-append for these
+codecs. The temporary `[Int]` representation still has significant memory
+overhead compared to a native byte buffer, and streaming codecs and binary host
+I/O must be implemented separately.
 
 ### Example
 
