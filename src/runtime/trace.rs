@@ -137,6 +137,67 @@ impl TraceContext {
         })
     }
 
+    /// Extract at most one W3C traceparent header from an inbound HTTP request.
+    /// Header names are case-insensitive. Duplicates fail closed rather than
+    /// selecting whichever happens to appear first.
+    pub fn from_http_headers(headers: &[(String, String)]) -> Option<Self> {
+        let mut incoming: Option<&str> = None;
+        for (name, value) in headers {
+            if name.eq_ignore_ascii_case("traceparent") {
+                if incoming.is_some() {
+                    return None;
+                }
+                incoming = Some(value.trim());
+            }
+        }
+        Self::from_traceparent(incoming?)
+    }
+
+    /// Attach this exact context as a remote parent to a tracing span.
+    /// This is the bridge from W3C transport metadata to *real* OTel
+    /// SpanContext: text fields alone do not establish an exported parent.
+    #[cfg(feature = "otel")]
+    pub(crate) fn attach_as_otel_parent(&self, span: &tracing::Span) {
+        use opentelemetry::trace::{
+            SpanContext, SpanId, TraceContextExt as _, TraceFlags, TraceId, TraceState,
+        };
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+        let remote_parent = SpanContext::new(
+            TraceId::from_bytes(self.trace_id.to_be_bytes()),
+            SpanId::from_bytes(self.span_id.to_be_bytes()),
+            TraceFlags::new(if self.sampled { 1 } else { 0 }),
+            true,
+            TraceState::default(),
+        );
+        let cx = opentelemetry::Context::new().with_remote_span_context(remote_parent);
+        // If no OTel subscriber exists, tracing fields still work. Never
+        // prevent actor or HTTP dispatch solely because tracing is disabled.
+        let _ = span.set_parent(cx);
+    }
+
+    /// Read the actual exported span identity. tracing-opentelemetry assigns
+    /// a fresh span ID independently of our actor trace token; outgoing
+    /// messages must carry the *exported* ID to preserve real parentage.
+    #[cfg(feature = "otel")]
+    fn exported_span_identity(&self, span: &tracing::Span) -> Option<Self> {
+        use opentelemetry::trace::TraceContextExt as _;
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+        let cx = span.context();
+        let current = cx.span();
+        let id = current.span_context();
+        if !id.is_valid() {
+            return None;
+        }
+        Some(Self {
+            trace_id: u128::from_be_bytes(id.trace_id().to_bytes()),
+            span_id: u64::from_be_bytes(id.span_id().to_bytes()),
+            parent_span_id: self.parent_span_id,
+            sampled: id.is_sampled(),
+        })
+    }
+
     /// Encode as a W3C `traceparent` string.
     pub fn to_traceparent(&self) -> String {
         let flags = if self.sampled { "01" } else { "00" };
@@ -172,7 +233,7 @@ impl TraceContext {
         let trace = format!("{:032x}", self.trace_id);
         let span = format!("{:016x}", self.span_id);
         let parent = format!("{:016x}", self.parent_span_id);
-        tracing::span!(
+        let span = tracing::span!(
             parent: None,
             tracing::Level::TRACE,
             "actor_msg",
@@ -181,7 +242,18 @@ impl TraceContext {
             trace_id = %trace,
             span_id = %span,
             parent_span_id = %parent,
-        )
+        );
+        #[cfg(feature = "otel")]
+        if self.parent_span_id != 0 {
+            let parent = Self {
+                trace_id: self.trace_id,
+                span_id: self.parent_span_id,
+                parent_span_id: 0,
+                sampled: self.sampled,
+            };
+            parent.attach_as_otel_parent(&span);
+        }
+        span
     }
 
     /// Enter a dispatch span for this context, if any subscriber is attached
@@ -192,10 +264,31 @@ impl TraceContext {
         actor_id: u64,
         behavior_idx: usize,
     ) -> Option<tracing::span::EnteredSpan> {
+        self.enter_dispatch_span_with_context(actor_id, behavior_idx).0
+    }
+
+    /// Enter the actor span and return its actual exported identity for
+    /// subsequent mailbox / network traceparent propagation. With no OTel
+    /// subscriber or feature, retain the runtime's existing logical ID.
+    pub(crate) fn enter_dispatch_span_with_context(
+        &self,
+        actor_id: u64,
+        behavior_idx: usize,
+    ) -> (Option<tracing::span::EnteredSpan>, Self) {
         if !tracing::enabled!(tracing::Level::TRACE) {
-            return None;
+            return (None, *self);
         }
-        Some(self.tracing_span(actor_id, behavior_idx).entered())
+        let span = self.tracing_span(actor_id, behavior_idx);
+        #[cfg(feature = "otel")]
+        let effective = self.exported_span_identity(&span).unwrap_or(*self);
+        #[cfg(not(feature = "otel"))]
+        let effective = *self;
+        #[cfg(feature = "otel")]
+        {
+            span.record("trace_id", tracing::field::display(format!("{:032x}", effective.trace_id)));
+            span.record("span_id", tracing::field::display(format!("{:016x}", effective.span_id)));
+        }
+        (Some(span.entered()), effective)
     }
 }
 
