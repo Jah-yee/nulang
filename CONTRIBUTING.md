@@ -25,6 +25,18 @@ NULANG_BIN=./target/release/nulang bash scripts/verify_doc_examples.sh  # doc sn
 
 Please make sure these pass before opening a PR. CI runs them all.
 
+## Continuous integration
+
+[GitHub Actions](.github/workflows/ci.yml) is Nulang's primary CI system. It
+validates pull requests and pushes to `main` with Rust builds, tests, formatting,
+Clippy, optional-feature checks, and additional release/documentation checks.
+
+Before opening a pull request, run `bash scripts/ci-local.sh` (or
+`bash scripts/ci-local.sh --full` for the comprehensive local matrix).
+Merge protection should require GitHub Actions checks rather than checks from
+retired external CI providers. Performance benchmarks are maintained in
+separate GitHub Actions workflows.
+
 ## Commit style
 
 We use [Conventional Commits](https://www.conventionalcommits.org/):
