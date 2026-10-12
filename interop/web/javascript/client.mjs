@@ -116,7 +116,7 @@ export class NulangWebClient {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      const response = await this.fetch(url.href, {method, headers:reqHeaders, body:encodedBody, signal:controller.signal});
+      const response = await this.fetch(url.href, {method, headers:reqHeaders, body:encodedBody, signal:controller.signal, redirect:'manual'});
       if (!response.ok) throw new ApiError(response.status, await response.text(), response.headers);
       return response;
     } finally { clearTimeout(timer); }
