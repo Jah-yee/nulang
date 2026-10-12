@@ -2352,7 +2352,7 @@ impl Parser {
             if self.match_token(&TokenKind::RBrace) {
                 break;
             }
-            let op_name = self.expect_ident("operation name")?;
+            let op_name = self.expect_effect_operation_name()?;
             self.expect(TokenKind::Colon)?;
 
             // Parse argument types
@@ -2395,7 +2395,7 @@ impl Parser {
             self.consume_if(&TokenKind::Pipe);
             let effect_name = self.expect_ident("effect name")?;
             self.expect(TokenKind::Dot)?;
-            let op_name = self.expect_ident("operation name")?;
+            let op_name = self.expect_effect_operation_name()?;
             self.expect(TokenKind::LParen)?;
             let mut params = Vec::new();
             self.skip_newlines();
@@ -4281,36 +4281,7 @@ impl Parser {
         self.advance(); // consume 'perform'
         let effect = self.expect_ident("effect name")?;
         self.expect(TokenKind::Dot)?;
-        // Several built-in effect operation names are also reserved keywords.
-        // Accept them only after `perform Effect.` rather than relaxing general
-        // identifier or import-declaration parsing.
-        let op = match self.peek_kind() {
-            TokenKind::Import => {
-                self.advance();
-                "import".to_string()
-            }
-            TokenKind::Ask => {
-                self.advance();
-                "ask".to_string()
-            }
-            TokenKind::Link => {
-                self.advance();
-                "link".to_string()
-            }
-            TokenKind::Monitor => {
-                self.advance();
-                "monitor".to_string()
-            }
-            TokenKind::Exit => {
-                self.advance();
-                "exit".to_string()
-            }
-            TokenKind::Ref => {
-                self.advance();
-                "ref".to_string()
-            }
-            _ => self.expect_ident("operation name")?,
-        };
+        let op = self.expect_effect_operation_name()?;
         self.expect(TokenKind::LParen)?;
         let args = self.parse_arg_list()?;
         Ok(Expr::Perform {
@@ -4689,6 +4660,28 @@ impl Parser {
         }
     }
 
+    /// Parse an effect operation name in declarations, perform, and handlers.
+    /// Some registered operations use words reserved by the general grammar
+    /// (notably Python.import and Actor.link). Keep this exception local to
+    /// effect-operation positions; declaration keywords remain reserved.
+    fn expect_effect_operation_name(&mut self) -> NuResult<String> {
+        let keyword_name = match self.peek_kind() {
+            TokenKind::Import => Some("import"),
+            TokenKind::Ask => Some("ask"),
+            TokenKind::Link => Some("link"),
+            TokenKind::Monitor => Some("monitor"),
+            TokenKind::Exit => Some("exit"),
+            TokenKind::Ref => Some("ref"),
+            _ => None,
+        };
+        if let Some(name) = keyword_name {
+            self.advance();
+            Ok(name.to_string())
+        } else {
+            self.expect_ident("operation name")
+        }
+    }
+
     fn expect_ident(&mut self, msg: &str) -> NuResult<String> {
         let current_kind = self.peek_kind();
         match current_kind {
@@ -4949,7 +4942,7 @@ impl Parser {
             self.consume_if(&TokenKind::Pipe);
             let effect_name = self.expect_ident("effect name")?;
             self.expect(TokenKind::Dot)?;
-            let op_name = self.expect_ident("operation name")?;
+            let op_name = self.expect_effect_operation_name()?;
             self.expect(TokenKind::LParen)?;
             let mut params = Vec::new();
             self.skip_newlines();
