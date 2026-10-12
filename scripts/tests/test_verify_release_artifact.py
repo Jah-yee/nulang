@@ -72,6 +72,25 @@ class ReleaseArtifactVerificationTests(unittest.TestCase):
         with self.assertRaisesRegex(VerificationError, "version"):
             self.verify(tag="v0.2.0")
 
+    def test_rejects_version_embedded_in_another_version(self):
+        # v0.1.0 must not accept "Nulang 10.1.0" just because its
+        # version digits contain the requested version as a substring.
+        self.make_archive(script=self.script.replace("Nulang 0.1.0", "Nulang 10.1.0"))
+        with self.assertRaisesRegex(VerificationError, "version"):
+            self.verify()
+
+    def test_rejects_version_with_unexpected_suffix(self):
+        self.make_archive(script=self.script.replace("Nulang 0.1.0", "Nulang 0.1.0-debug"))
+        with self.assertRaisesRegex(VerificationError, "version"):
+            self.verify()
+
+    def test_accepts_version_line_with_language_metadata(self):
+        self.make_archive(script=self.script.replace(
+            'echo "Nulang 0.1.0"; exit 0;',
+            'printf "nulang 0.1.0\\nlanguage 1.0.0-frozen\\n"; exit 0;',
+        ))
+        self.verify()
+
     def test_rejects_broken_eval_command(self):
         self.make_archive(script="#!/bin/sh\nexit 5\n")
         with self.assertRaises(VerificationError):
