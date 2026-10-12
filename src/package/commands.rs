@@ -3194,10 +3194,14 @@ app "counter" {
     }
 
     #[test]
-    fn test_strip_main_ignores_braces_inside_string_literals() {
-        let source = "fn main() {\n  let s = \"}\"\n  perform IO.print(s)\n}\nfn test_ok() { 1 }\n";
-        assert_eq!(strip_main_function(source).trim(), "fn test_ok() { 1 }");
+    fn test_named_test_dispatch_uses_original_file_with_selector() {
+        let mut cmd = Command::new("nulang");
+        append_test_selector_args(&mut cmd, "tests/test_math.nula", Some("test_add"));
+        let args: Vec<_> = cmd.get_args().map(|s| s.to_string_lossy().into_owned()).collect();
+        assert_eq!(
+            args,
+            vec!["tests/test_math.nula", "--test-function", "test_add"]
+        );
     }
-
 
 }
