@@ -257,6 +257,62 @@ mod tests {
     }
 
     #[test]
+    fn test_unique_unbound_name_emits_exact_machine_replacement() {
+        let source = "fn main() = countr + 1\n";
+        set_source_map_with_file(source, Some("typo.nula"));
+        let start = "fn main() = ".len() as u32;
+        let err = NuError::unbound_variable(
+            "countr",
+            Span::new(start, start + 6),
+            Some(vec!["counter".to_owned()]),
+        );
+        let diagnostic = diagnostics_from_error(&err).remove(0);
+        let fix = diagnostic.suggestion.expect("unambiguous fix");
+        assert_eq!(fix.replacement.as_deref(), Some("counter"));
+        assert_eq!(diagnostic.span.expect("source range").file, "typo.nula");
+        clear_source_map();
+    }
+
+    #[test]
+    fn test_ambiguous_typo_does_not_emit_machine_replacement() {
+        set_source_map_with_file("fn main() = countr\n", Some("ambiguous.nula"));
+        let start = "fn main() = ".len() as u32;
+        let err = NuError::unbound_variable(
+            "countr",
+            Span::new(start, start + 6),
+            Some(vec!["counter".to_owned(), "count".to_owned()]),
+        );
+        let diagnostic = diagnostics_from_error(&err).remove(0);
+        assert!(
+            diagnostic
+                .suggestion
+                .and_then(|fix| fix.replacement)
+                .is_none(),
+            "never auto-apply ambiguous name fixes"
+        );
+        clear_source_map();
+    }
+
+    #[test]
+    fn test_wrong_source_span_does_not_emit_machine_replacement() {
+        set_source_map_with_file("fn main() = countr\n", Some("mismatch.nula"));
+        let err = NuError::unbound_variable(
+            "countr",
+            Span::new(0, 6),
+            Some(vec!["counter".to_owned()]),
+        );
+        let diagnostic = diagnostics_from_error(&err).remove(0);
+        assert!(
+            diagnostic
+                .suggestion
+                .and_then(|fix| fix.replacement)
+                .is_none(),
+            "a suggested edit must identify the exact unknown identifier"
+        );
+        clear_source_map();
+    }
+
+    #[test]
     fn test_multiple_flattens() {
         let span = Span::default();
         let errs = NuError::Multiple(vec![
