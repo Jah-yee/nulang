@@ -2580,7 +2580,9 @@ impl crate::vm::DistributedVmCallbacks for BytecodeDistributedCallbacks {
                 let addr = spawn_on_node(rt, t, c, r, node, behavior, init.to_vec());
                 crate::vm::Value::actor_ref(addr.actor_id())
             } else {
-                crate::vm::Value::actor_ref(0)
+                // Missing transport, cluster or resolver is a failed spawn, not
+                // an actor with the reserved id zero.
+                crate::vm::Value::nil()
             };
             rt.distributed.transport = transport;
             rt.distributed.resolver = resolver;
