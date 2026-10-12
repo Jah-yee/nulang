@@ -12347,4 +12347,54 @@ match { a: 2, b: 9 } with {
         let value2 = vm2.run().expect("execute from disk");
         assert_eq!(value2.as_int(), Some(90));
     }
+
+    /// User-declared workflow state is authoritative for checkpoints: durable
+    /// fields survive a completed step; local fields must not leak to storage.
+    #[test]
+    fn test_workflow_declared_state_models_checkpoint_after_compiled_step() {
+        let source = r#"
+            workflow StateCheckpoint {
+                state durable answer: String = ""
+                state local temporary: Int = 0
+                step write {
+                    (self.answer = "persisted-answer", self.temporary = 99)
+                }
+            }
+            let w = spawn StateCheckpoint {} in { w }
+        "#;
+        let (module, _ty) = compile_source(source).expect("compile declared workflow state");
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let backing = SharedMemoryStore::new();
+        rt.borrow_mut().persistence = Box::new(backing.clone());
+        let reference = {
+            let mut vm = VM::new();
+            vm.load_module(module);
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+            vm.run().expect("spawn compiled workflow")
+        };
+        let actor_id = reference.as_actor_id().expect("workflow actor id");
+        rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        rt.borrow_mut().run_scheduler();
+        let saved = backing.load_snapshot(actor_id).expect("durable step checkpoint");
+        assert_eq!(
+            saved.state.get("answer"),
+            Some(&crate::runtime::PersistedValue::String("persisted-answer".to_string()))
+        );
+        assert!(!saved.state.contains_key("temporary"), "local state must not be checkpointed");
+        assert_eq!(
+            saved.state.get("step_index"),
+            Some(&crate::runtime::PersistedValue::Int(1))
+        );
+    }
+
+    #[test]
+    fn test_workflow_declared_state_type_mismatch_is_rejected() {
+        let source = r#"
+            workflow BadState {
+                state durable count: Int = "wrong"
+                step write { self.count = 1 }
+            }
+        "#;
+        assert!(compile_source(source).is_err(), "invalid durable field default must fail type checking");
+    }
 }
