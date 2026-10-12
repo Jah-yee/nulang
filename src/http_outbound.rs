@@ -7,6 +7,7 @@ use std::io::Read;
 use std::time::Duration;
 
 const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
+const MAX_HEADER_BYTES: usize = 64 * 1024;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Execute a single outbound request and return a UTF-8 JSON response:
@@ -36,13 +37,21 @@ pub fn request_text(
     if body.len() > MAX_BODY_BYTES {
         return Err("Http.request: request body exceeds 4 MiB limit".to_string());
     }
+    if headers_json.len() > MAX_HEADER_BYTES {
+        return Err("Http.request: request headers exceed 64 KiB limit".to_string());
+    }
     let pairs: Vec<(String, String)> = serde_json::from_str(headers_json)
         .map_err(|_| "Http.request: headers must be a JSON array of [name,value] pairs".to_string())?;
     if pairs.len() > 100 {
         return Err("Http.request: too many headers".to_string());
     }
     let mut seen = HashSet::new();
+    let mut total_header_bytes = 0usize;
     for (name, value) in &pairs {
+        total_header_bytes += name.len() + value.len();
+        if total_header_bytes > MAX_HEADER_BYTES || name.len() > 256 || value.len() > 8192 {
+            return Err("Http.request: headers exceed configured limits".to_string());
+        }
         if name.is_empty()
             || !name.as_bytes().iter().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_|~".contains(b) || *b == 0x60)
         {
