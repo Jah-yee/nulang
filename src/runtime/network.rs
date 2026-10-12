@@ -2914,7 +2914,10 @@ mod tests {
         assert_eq!(packets.len(), 1);
         assert_eq!(packets[0].seq, 41);
         assert!(matches!(&packets[0].packet, Packet::Ack { packet_seq: 7 }));
-        assert!(transport.receive().is_empty(), "wakeup must not duplicate a packet");
+        assert!(
+            transport.receive().is_empty(),
+            "wakeup must not duplicate a packet"
+        );
         transport.shutdown();
     }
 
