@@ -1165,7 +1165,7 @@ mod tests {
                 r#"(module
                     (import "env" "memory" (memory 1))
                     (import "env" "arith_add" (func $add (param i64 i64) (result i64)))
-                    (data (i32.const 8) "x\\00")
+                    (data (i32.const 8) "x\00")
                     (func (export "nulang_init") (result i64)
                         i64.const {lhs}
                         i64.const {rhs}
