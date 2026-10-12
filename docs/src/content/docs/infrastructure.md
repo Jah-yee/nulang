@@ -3,7 +3,6 @@ title: Fewer Services for Durable Distributed Applications
 description: How Nulang aims to unify actors, durable workflows, messaging, streams, coordination, and storage—and the roadmap toward Redis, NATS, Kafka, Temporal, and database workloads.
 ---
 
-# Building durable distributed applications with fewer services
 
 A distributed application often grows into a collection of **application services, a cache, a message broker, a durable event log, a workflow engine and a database**. Redis, NATS, Kafka, Temporal and PostgreSQL each solve important problems, but connecting them introduces extra deployment, security, observability, backup, failure and data-consistency boundaries.
 
