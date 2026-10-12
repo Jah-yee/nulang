@@ -8808,6 +8808,64 @@ match { a: 2, b: 9 } with {
         );
     }
 
+    /// A non-injected resumed VM error must durably record StepFailed before
+    /// compensating previously completed saga steps.
+    #[test]
+    fn test_workflow_signal_resume_failure_persists_before_compensation() {
+        let source = r#"
+            workflow SignalFailureRecovery {
+                step prepare {
+                    self.step_index = self.step_index + 1
+                } compensate {
+                    self.comp_order = 1
+                }
+                step fail_step {
+                    (perform Signal.wait("go"), perform Fail.now())
+                }
+            }
+            let w = spawn SignalFailureRecovery {} in { w }
+        "#;
+        let backing = SharedMemoryStore::new();
+        let (module, _ty) = compile_source(source).unwrap();
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        rt.borrow_mut().persistence = Box::new(backing.clone());
+        let value = {
+            let mut vm = VM::new();
+            vm.load_module(module);
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+            vm.run().unwrap()
+        };
+        let actor_id = value.as_actor_id().expect("spawn should return actor ref");
+
+        rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        rt.borrow_mut().run_scheduler();
+        rt.borrow_mut().send_message_by_id(actor_id, 1, &[]);
+        rt.borrow_mut().run_scheduler();
+        assert_eq!(
+            rt.borrow().actors.get(&actor_id).unwrap().waiting_signal.as_deref(),
+            Some("go"),
+            "the failing step must first suspend"
+        );
+
+        rt.borrow_mut().signal_workflow(actor_id, "go", None).unwrap();
+        let events = backing.read_workflow_events(actor_id);
+        let failed = events.iter().position(|event| {
+            matches!(event, WorkflowEvent::StepFailed { step_name, .. } if step_name == "fail_step")
+        });
+        let compensated = events.iter().position(|event| {
+            matches!(event, WorkflowEvent::SagaCompensated { step_name, .. } if step_name == "prepare")
+        });
+        assert!(failed.is_some(), "resumed failure must be persisted");
+        assert!(
+            compensated.is_some_and(|index| index > failed.unwrap()),
+            "saga compensation must be recorded after the durable StepFailed"
+        );
+        assert!(
+            rt.borrow().actors.contains_key(&actor_id),
+            "successfully persisted failure must not quarantine the actor"
+        );
+    }
+
     /// A timer continuation that throws after resumption must fail closed
     /// when its StepFailed terminal event cannot be committed.
     #[test]
