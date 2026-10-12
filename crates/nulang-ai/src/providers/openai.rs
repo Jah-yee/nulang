@@ -370,4 +370,87 @@ mod tests {
         };
         assert_eq!(arguments.get("location").unwrap(), "NYC");
     }
+
+    #[test]
+    fn tool_calls_accept_object_and_json_encoded_object_arguments() {
+        let calls = vec![
+            OpenAiToolCall {
+                id: "direct".into(),
+                function: OpenAiToolCallFunction {
+                    name: "lookup".into(),
+                    arguments: json!({"id": 42}),
+                },
+            },
+            OpenAiToolCall {
+                id: "encoded".into(),
+                function: OpenAiToolCallFunction {
+                    name: "lookup".into(),
+                    arguments: json!("{\\"id\\":43}"),
+                },
+            },
+        ];
+        let parsed = parse_tool_calls(calls).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].arguments.get("id"), Some(&json!(42)));
+        assert_eq!(parsed[1].arguments.get("id"), Some(&json!(43)));
+    }
+
+    #[test]
+    fn tool_calls_reject_malformed_json_instead_of_executing_with_empty_arguments() {
+        let calls = vec![OpenAiToolCall {
+            id: "bad".into(),
+            function: OpenAiToolCallFunction {
+                name: "delete_resource".into(),
+                arguments: json!("{\\"resource\\":"),
+            },
+        }];
+        let error = parse_tool_calls(calls).unwrap_err();
+        assert_eq!(error.kind, LlmErrorKind::FormatError);
+    }
+
+    #[test]
+    fn tool_calls_reject_non_object_json_arguments() {
+        for arguments in [
+            json!("[]"),
+            json!("null"),
+            json!([1, 2]),
+            json!(null),
+            json!(42),
+        ] {
+            let calls = vec![OpenAiToolCall {
+                id: "bad".into(),
+                function: OpenAiToolCallFunction {
+                    name: "delete_resource".into(),
+                    arguments,
+                },
+            }];
+            let error = parse_tool_calls(calls).unwrap_err();
+            assert_eq!(error.kind, LlmErrorKind::FormatError);
+        }
+    }
+
+    #[test]
+    fn tool_calls_reject_entire_batch_when_later_call_is_malformed() {
+        let calls = vec![
+            OpenAiToolCall {
+                id: "valid".into(),
+                function: OpenAiToolCallFunction {
+                    name: "lookup".into(),
+                    arguments: json!({"id": 1}),
+                },
+            },
+            OpenAiToolCall {
+                id: "invalid".into(),
+                function: OpenAiToolCallFunction {
+                    name: "delete_resource".into(),
+                    arguments: json!("not-json"),
+                },
+            },
+        ];
+        assert_eq!(
+            parse_tool_calls(calls).unwrap_err().kind,
+            LlmErrorKind::FormatError
+        );
+    }
+
 }
