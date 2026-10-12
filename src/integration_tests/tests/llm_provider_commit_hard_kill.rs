@@ -248,12 +248,13 @@ fn kill_after_stage(
 
     let stdout = child.stdout.take().expect("capture provider readiness");
     let (send, recv) = mpsc::channel();
+    let expected_ready = ready_marker.to_string();
     let reader = std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
             let Ok(line) = line else {
                 break;
             };
-            if let Some(id) = line.split(ready_marker).nth(1) {
+            if let Some(id) = line.split(expected_ready.as_str()).nth(1) {
                 let _ = send.send(id.trim().parse::<u64>());
                 return;
             }
