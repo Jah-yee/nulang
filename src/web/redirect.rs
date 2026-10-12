@@ -17,7 +17,12 @@ mod tests {
 
     #[test]
     fn accepts_safe_same_origin_absolute_paths() {
-        for target in ["/", "/tasks", "/tasks?tab=mine&sort=recent", "/users/42#activity"] {
+        for target in [
+            "/",
+            "/tasks",
+            "/tasks?tab=mine&sort=recent",
+            "/users/42#activity",
+        ] {
             assert!(is_safe_redirect_target(target), "rejected {target:?}");
         }
     }
