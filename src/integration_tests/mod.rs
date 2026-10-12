@@ -120,6 +120,54 @@ mod tests {
         }
     }
 
+    /// Real VM immediate failed-step injection: only the terminal StepFailed
+    /// append is rejected. Command admission, suspension journaling, and the
+    /// actor's initial checkpoint still use the real shared memory backend.
+    #[derive(Clone)]
+    struct RejectStepFailedStore(SharedMemoryStore);
+
+    impl PersistenceStore for RejectStepFailedStore {
+        fn save_snapshot(&mut self, snapshot: ActorSnapshot) -> std::io::Result<()> {
+            self.0.save_snapshot(snapshot)
+        }
+        fn load_snapshot(&self, actor_id: u64) -> Option<ActorSnapshot> {
+            self.0.load_snapshot(actor_id)
+        }
+        fn append_journal(&mut self, actor_id: u64, entry: JournalEntry) -> std::io::Result<()> {
+            self.0.append_journal(actor_id, entry)
+        }
+        fn read_journal(&self, actor_id: u64) -> Vec<JournalEntry> {
+            self.0.read_journal(actor_id)
+        }
+        fn append_workflow_event(
+            &mut self,
+            actor_id: u64,
+            event: WorkflowEvent,
+        ) -> std::io::Result<()> {
+            if matches!(event, WorkflowEvent::StepFailed { .. }) {
+                return Err(std::io::Error::other(
+                    "injected terminal workflow append failure",
+                ));
+            }
+            self.0.append_workflow_event(actor_id, event)
+        }
+        fn read_workflow_events(&self, actor_id: u64) -> Vec<WorkflowEvent> {
+            self.0.read_workflow_events(actor_id)
+        }
+        fn append_event(&mut self, actor_id: u64, entry: EventEntry) -> std::io::Result<()> {
+            self.0.append_event(actor_id, entry)
+        }
+        fn read_events(&self, actor_id: u64) -> Vec<EventEntry> {
+            self.0.read_events(actor_id)
+        }
+        fn latest_sequence(&self, actor_id: u64) -> u64 {
+            self.0.latest_sequence(actor_id)
+        }
+        fn clear(&mut self, actor_id: u64) -> std::io::Result<()> {
+            self.0.clear(actor_id)
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Test helpers
     // -----------------------------------------------------------------------
@@ -8484,6 +8532,62 @@ match { a: 2, b: 9 } with {
             safe.state.get("step_index")
         );
         assert_eq!(recovered.state.get("answer"), safe.state.get("answer"));
+    }
+
+    /// A failed compiled workflow step must not checkpoint mutated state or run
+    /// compensations when its terminal StepFailed event is rejected.
+    #[test]
+    fn test_workflow_immediate_failed_step_append_failure_quarantines_actor() {
+        let source = r#"
+            workflow FailureRejectTerminal {
+                step fail_step {
+                    {
+                        self.answer = "uncommitted"
+                        let m: Maybe[Int] = None in
+                        match m { | Some(x) => x }
+                    }
+                }
+            }
+            type Maybe[V] = Some(V) | None
+            let w = spawn FailureRejectTerminal {} in { w }
+        "#;
+        let backing = SharedMemoryStore::new();
+        let (module, _ty) = compile_source(source).unwrap();
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        rt.borrow_mut().persistence = Box::new(RejectStepFailedStore(backing.clone()));
+
+        let value = {
+            let mut vm = VM::new();
+            vm.load_module(module);
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+            vm.run().unwrap()
+        };
+        let actor_id = value.as_actor_id().expect("spawn should return actor ref");
+        let safe = backing.load_snapshot(actor_id).expect("initial durable snapshot");
+
+        rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        rt.borrow_mut().run_scheduler();
+
+        assert!(
+            !rt.borrow().actors.contains_key(&actor_id),
+            "rejected StepFailed must quarantine the speculative failed activation"
+        );
+        assert!(
+            !backing.read_workflow_events(actor_id).iter().any(|event| {
+                matches!(event, WorkflowEvent::StepFailed { .. })
+            }),
+            "rejected failure event must not appear in persisted history"
+        );
+        let recovered = backing.load_snapshot(actor_id).expect("safe snapshot remains");
+        assert_eq!(
+            recovered.sequence, safe.sequence,
+            "failed step must not checkpoint before its terminal event commits"
+        );
+        assert_eq!(
+            recovered.state.get("answer"),
+            safe.state.get("answer"),
+            "failed step must not expose speculative field mutation"
+        );
     }
 
     /// Crash-and-recover for a workflow step suspended on `Inference.ask`: the
