@@ -12,13 +12,17 @@ fn main() {
         eprintln!("expected exactly one existing source-root directory/file");
         std::process::exit(2);
     }
-    let contracts = nulang::web::validation::compile_validated_contracts_from_tree(Path::new(&root))
-        .unwrap_or_else(|diagnostics| {
-            for message in diagnostics {
-                eprintln!("{message}");
-            }
-            std::process::exit(1);
-        });
+    let contracts =
+        nulang::web::validation::compile_validated_contracts_from_tree(Path::new(&root))
+            .unwrap_or_else(|diagnostics| {
+                for message in diagnostics {
+                    eprintln!("{message}");
+                }
+                std::process::exit(1);
+            });
     let document = nulang::web::openapi::generate_openapi(&contracts, "Nulang Web API", "0.1.0");
-    println!("{}", serde_json::to_string_pretty(&document).expect("OpenAPI is serializable"));
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&document).expect("OpenAPI is serializable")
+    );
 }
