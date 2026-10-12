@@ -52,13 +52,14 @@ fn transmits_headers_and_methods_and_preserves_response_status() {
     let result = nulang::http_outbound::request_text(
         "PATCH",
         &url,
-        r#"[["Authorization","Bearer sample"],["Content-Type","application/json"],["X-Tenant","tenant-1"]]"#,
+        r#"[["Authorization","Bearer sample"],["Content-Type","application/json"],["X-Tenant","tenant-1"],["traceparent","00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"]]"#,
         r#"{"name":"nulang"}"#,
     ).expect("HTTP reply");
     let seen = listener.join().expect("server");
     assert!(seen.starts_with("PATCH /v1/test HTTP/1.1\r\n"));
     assert!(seen.contains("Authorization: Bearer sample\r\n") || seen.to_lowercase().contains("authorization: bearer sample\r\n"));
     assert!(seen.to_ascii_lowercase().contains("x-tenant: tenant-1\r\n"));
+    assert!(seen.to_ascii_lowercase().contains("traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\r\n"));
     assert!(seen.contains(r#"{"name":"nulang"}"#));
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
     assert_eq!(parsed["status"], 201);
