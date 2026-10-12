@@ -154,6 +154,8 @@ export default defineConfig({
           collapsed: false,
           items: [
             { label: 'Comparisons & Philosophy', link: 'blog/' },
+            { label: 'Compare Languages & Frameworks', link: 'comparisons/' },
+            { label: 'Reduce Infrastructure Services', link: 'infrastructure/' },
           ],
         },
         {
