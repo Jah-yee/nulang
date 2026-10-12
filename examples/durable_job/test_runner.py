@@ -20,25 +20,35 @@ class CrashHarnessTests(unittest.TestCase):
         self.assertIn("PASS sqlite:", result.stdout)
         self.assertIn("RECOVERED=2:1, COMPLETED=2:1", result.stdout)
 
-    def test_nulang_cli_arguments_grant_only_fs_as_separate_tokens(self):
-        # Regression: --with=fs is rejected; the CLI accepts --with fs.
+    def test_actor_demo_uses_bytecode_store_without_unsupported_os_fs_effects(self):
+        # The actor-backed VM cannot execute Env.get, System.arg, or FS.read.
         with mock.patch.object(run_demo, "run_phase") as phase:
             run_demo.exercise("nulang", ["/some/nulang"], 5)
         self.assertEqual(phase.call_count, 3)
         for call in phase.call_args_list:
             argv = call.args[0]
-            self.assertEqual(argv[:5], ["/some/nulang", "--backend", "bytecode", "--with", "fs"])
-            self.assertNotIn("--with=fs", argv)
+            self.assertEqual(argv[:3], ["/some/nulang", "--backend", "bytecode"])
+            self.assertNotIn("--with", argv)
             self.assertIn("--store", argv)
+            self.assertTrue(argv[-1].endswith("job.nula"))
+
+    def test_prepare_crash_reports_child_exit_and_stderr(self):
+        with tempfile.TemporaryDirectory() as temp:
+            child = Path(temp) / "bad-child.py"
+            child.write_text("import sys\\nprint('actual runtime failure', file=sys.stderr)\\nsys.exit(5)\\n")
+            with self.assertRaisesRegex(RuntimeError, "actual runtime failure"):
+                run_demo.run_phase([sys.executable, str(child)], Path(temp),
+                                   "prepare", ["PREPARED=1:0"], 5)
 
     def test_runner_rejects_fake_nulang_that_loses_committed_state(self):
         with tempfile.TemporaryDirectory() as temp:
             fake = Path(temp) / "broken-nulang"
             fake.write_text("#!/usr/bin/env python3\n"
                             "import os\n"
+                            "import sys\n"
                             "if os.environ['DEMO_PHASE']=='prepare':\n"
                             "    print('PREPARED=1:0',flush=True)\n"
-                            "    open('gate.fifo').read()\n"
+                            "    sys.stdin.readline()\n"
                             "else:\n"
                             "    print('RECOVERED=0:0',flush=True)\n"
                             "    print('COMPLETED=2:1',flush=True)\n")
