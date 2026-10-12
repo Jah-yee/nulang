@@ -282,6 +282,29 @@ impl LazyQueryHandlers {
     }
 }
 
+// Preserve the ordinary HashMap read and mutation surface for embedders.
+// Unregistered actors dereference to a shared immutable empty map; mutations
+// instantiate private storage before returning a mutable reference.
+impl std::ops::Deref for LazyQueryHandlers {
+    type Target = HashMap<String, Value>;
+
+    fn deref(&self) -> &Self::Target {
+        static EMPTY: std::sync::OnceLock<HashMap<String, Value>> =
+            std::sync::OnceLock::new();
+        self.inner
+            .as_deref()
+            .unwrap_or_else(|| EMPTY.get_or_init(HashMap::new))
+    }
+}
+
+impl std::ops::DerefMut for LazyQueryHandlers {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.inner
+            .get_or_insert_with(|| Box::new(HashMap::new()))
+            .as_mut()
+    }
+}
+
 /// An actor: independent unit of computation with isolated state and mailbox.
 pub struct Actor {
     pub id: u64,
