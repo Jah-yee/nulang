@@ -7921,7 +7921,9 @@ mod tests {
         // must not be rejected as a keyword in expression position.
         let expr = parse_expr("perform Python.import(\"math\")").unwrap();
         match expr {
-            Expr::Perform { effect, op, args, .. } => {
+            Expr::Perform {
+                effect, op, args, ..
+            } => {
                 assert_eq!(effect, "Python");
                 assert_eq!(op, "import");
                 assert_eq!(args.len(), 1);
