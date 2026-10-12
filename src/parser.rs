@@ -2166,6 +2166,7 @@ impl Parser {
         self.expect(TokenKind::LBrace)?;
 
         let mut items = Vec::new();
+        let mut state_fields = Vec::new();
         let mut compensate = None;
 
         self.skip_newlines();
@@ -2175,6 +2176,51 @@ impl Parser {
                 break;
             }
             match self.peek_kind() {
+                TokenKind::State => {
+                    self.advance(); // 'state'
+                    let model = match self.peek_kind() {
+                        TokenKind::Durable => {
+                            self.advance();
+                            StateModel::Durable
+                        }
+                        TokenKind::Local => {
+                            self.advance();
+                            StateModel::Local
+                        }
+                        _ => {
+                            return Err(NuError::parse_error(
+                                "Workflow state requires an explicit 'durable' or 'local' model"
+                                    .to_string(),
+                                self.current_span(),
+                            ));
+                        }
+                    };
+                    let field_name = self.expect_ident("workflow state field name")?;
+                    if matches!(
+                        field_name.as_str(),
+                        "step_index" | "workflow_name" | "parallel_progress"
+                    ) || state_fields
+                        .iter()
+                        .any(|(name, _, _, _): &(String, StateModel, Type, Expr)| name == &field_name)
+                    {
+                        return Err(NuError::parse_error(
+                            format!("Duplicate or reserved workflow state field '{field_name}'"),
+                            self.current_span(),
+                        ));
+                    }
+                    self.expect(TokenKind::Colon)?;
+                    let ty = self.parse_type()?;
+                    self.expect(TokenKind::Assign)?;
+                    let default = self.parse_expr()?;
+                    if !matches!(default, Expr::Literal(..)) {
+                        return Err(NuError::parse_error(
+                            "Workflow state defaults must be literals".to_string(),
+                            default.span(),
+                        ));
+                    }
+                    state_fields.push((field_name, model, ty, default));
+                    self.skip_newlines_semicolons();
+                }
                 TokenKind::Step => {
                     items.push(WorkflowItem::Step(self.parse_workflow_step()?));
                 }
@@ -2207,7 +2253,7 @@ impl Parser {
                 _ => {
                     return Err(NuError::parse_error(
                         format!(
-                            "Expected 'step', 'parallel', or 'compensate' in workflow body, got {}",
+                            "Expected 'state', 'step', 'parallel', or 'compensate' in workflow body, got {}",
                             self.peek_kind()
                         ),
                         self.current_span(),
@@ -2220,6 +2266,7 @@ impl Parser {
         Ok(Decl::Workflow {
             name,
             input: None,
+            state_fields,
             items,
             compensate,
             span,

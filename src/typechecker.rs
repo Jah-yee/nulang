@@ -1710,6 +1710,7 @@ impl TypeChecker {
             Decl::Workflow {
                 name: _,
                 input,
+                state_fields,
                 items,
                 span: _,
                 ..
@@ -1720,6 +1721,12 @@ impl TypeChecker {
                 let mut workflow_ctx = ctx.clone();
                 if let Some((input_name, input_ty)) = input {
                     workflow_ctx.bind(input_name.clone(), input_ty.clone(), Capability::Ref, false);
+                }
+                // An explicit workflow field cannot silently fall back to a
+                // different runtime type than its compiler-owned schema.
+                for (_name, _model, declared_ty, default) in state_fields {
+                    let (subst, actual_ty) = self.infer_expr(&workflow_ctx, default)?;
+                    let _ = mgu(&apply_subst(&actual_ty, &subst), declared_ty, default.span())?;
                 }
                 for item in items {
                     match item {

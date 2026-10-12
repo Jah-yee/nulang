@@ -170,6 +170,12 @@ fn try_spawn_actor_with_id(
     }
     actor.state_models = state_models;
     actor.persistent = persistent;
+    // A compiled workflow's initial checkpoint occurs before the ordinary
+    // spawn-from-module wiring. Preserve its module now so constant-pool
+    // strings in declared durable defaults serialize as strings, not Nil.
+    if let Some((module, _)) = expected_schema {
+        actor.bytecode_module = Some(Box::new(module.clone()));
+    }
     let workflow_name = workflow.map(|n| n.to_string());
     if let Some(name) = workflow {
         // Legacy storage field retained until the versioned ActorRole format
