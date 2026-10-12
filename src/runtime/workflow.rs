@@ -16,8 +16,8 @@ use crate::runtime::persistence::{
     ActorSnapshot, DurableTransition, EventEntry, JournalEntry, PersistedValue,
     WorkflowActivationId, WorkflowEvent, WorkflowReplayEventId, DURABLE_TRANSITION_VERSION,
 };
-use crate::semantic_identity::EffectSiteId;
 use crate::runtime::{BytecodeDistributedCallbacks, BytecodeRuntimeCallbacks, Runtime, StateModel};
+use crate::semantic_identity::EffectSiteId;
 use crate::vm::{Frame, Value, VM};
 
 // ---------------------------------------------------------------------------
