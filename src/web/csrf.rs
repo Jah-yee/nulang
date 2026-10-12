@@ -42,8 +42,12 @@ fn configured_authority(origin: &str) -> Result<&str, OriginCheckError> {
         .or_else(|| origin.strip_prefix("http://"))
         .ok_or(OriginCheckError::InvalidConfiguration)?;
     if rest.is_empty()
-        || rest.bytes().any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
-        || rest.bytes().any(|byte| matches!(byte, b'/' | b'?' | b'#' | b'@' | 92))
+        || rest
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+        || rest
+            .bytes()
+            .any(|byte| matches!(byte, b'/' | b'?' | b'#' | b'@' | 92))
         || rest.starts_with(':')
     {
         return Err(OriginCheckError::InvalidConfiguration);
@@ -114,8 +118,7 @@ pub fn validate_mutation_origin(
         };
     }
 
-    let referer = single_header(headers, "Referer")?
-        .ok_or(OriginCheckError::MissingProvenance)?;
+    let referer = single_header(headers, "Referer")?.ok_or(OriginCheckError::MissingProvenance)?;
     let path = referer.strip_prefix(&expected);
     if referer == expected || path.is_some_and(|suffix| suffix.starts_with('/')) {
         Ok(())
