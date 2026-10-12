@@ -1,5 +1,9 @@
 # Nulang Changelog
 
+### Python effect operation identifier parsing — 2026-10-11 (Experimental)
+- `perform Python.import("module")` now parses even though `import` is reserved for module declarations. The parser accepts the keyword only in the effect-operation position; ordinary module import grammar remains unchanged.
+- Added a parser regression test. This removes the source syntax blocker but does **not** claim Python string-marshalling parity, completed runtime end-to-end validation, or broader Python interoperability stability.
+
 ### Runtime soundness and checked negation — native/AOT backend parity — 2026-10-10
 - **AOT no longer claims raw-Int/Float registers for values that can be nil
   at runtime.** Nightly differential fuzz caught interpreter/AOT divergences
