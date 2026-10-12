@@ -289,8 +289,7 @@ impl std::ops::Deref for LazyQueryHandlers {
     type Target = HashMap<String, Value>;
 
     fn deref(&self) -> &Self::Target {
-        static EMPTY: std::sync::OnceLock<HashMap<String, Value>> =
-            std::sync::OnceLock::new();
+        static EMPTY: std::sync::OnceLock<HashMap<String, Value>> = std::sync::OnceLock::new();
         self.inner
             .as_deref()
             .unwrap_or_else(|| EMPTY.get_or_init(HashMap::new))
