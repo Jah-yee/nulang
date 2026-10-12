@@ -50,3 +50,13 @@ test('form arrays serialize as repeated fields and bearer token cannot conflict'
   assert.equal(request.body,'tag=a&tag=b');
   await assert.rejects(()=>client.call('read_item',{path:{item:'x'},headers:{'x-tenant-id':'acme',Authorization:'override'}}),/Authorization/);
 });
+
+test('redirects are blocked for authenticated requests', async () => {
+  let request;
+  const client=new NulangWebClient({baseUrl:'https://example.com',contract,token:'secret',fetchImpl:async (_,opts)=>{
+    request=opts;
+    return new Response('',{status:302,headers:{Location:'https://attacker.example/steal'}});
+  }});
+  await assert.rejects(()=>client.call('read_item',{path:{item:'x'},headers:{'x-tenant-id':'acme'}}),e=>e instanceof ApiError && e.status===302);
+  assert.equal(request.redirect,'manual');
+});
