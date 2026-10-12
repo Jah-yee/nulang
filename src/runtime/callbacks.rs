@@ -135,6 +135,7 @@ fn required_host_authority(
             name: string_arg(0)?,
         },
         ("Http", Some("get" | "post")) => http_outbound_authority(&string_arg(0)?)?,
+        ("Http", Some("request")) => http_outbound_authority(&string_arg(1)?)?,
         ("Http", Some("serve")) => {
             let port = regs
                 .first()
