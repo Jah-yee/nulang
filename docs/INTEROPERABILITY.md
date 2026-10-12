@@ -77,6 +77,7 @@ When running scripts outside the repository root set `PYTHONPATH` accordingly.
   is explicitly declared in OpenAPI. Responses are left as bytes (Python) or
   the native Fetch Response (JS). On non-2xx status the clients raise
   `ApiError` and retain the status/body. Network failures remain native errors.
+- Redirects are not followed, preventing credentials from being forwarded to another origin.
 - Timeouts are bounded. There are **no automatic retries**: retrying a POST
   after a timeout may duplicate an operation that already committed.
 - Undeclared fields, duplicate operation IDs, unknown media types, unsupported
