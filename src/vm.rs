@@ -1237,11 +1237,22 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
             let s = resolve_value_string(constants, *regs.first().unwrap_or(&Value::nil()));
             let start = regs.get(1).and_then(|v| v.as_int()).unwrap_or(0);
             let len = regs.get(2).and_then(|v| v.as_int()).unwrap_or(0);
-            if start < 0 || len < 0 || start as usize > s.len() {
+            // Byte offsets are part of String.substring's existing ABI, but
+            // slicing a Rust UTF-8 str inside a code point panics. Reject
+            // unaligned spans rather than constructing invalid UTF-8.
+            if start < 0 || len < 0 {
                 return Some(Value::nil());
             }
-            let end = ((start + len) as usize).min(s.len());
-            let sub = &s[start as usize..end];
+            let start = start as usize;
+            if start > s.len() {
+                return Some(Value::nil());
+            }
+            // Avoid signed overflow for large length arguments.
+            let end = start.saturating_add(len as usize).min(s.len());
+            if !s.is_char_boundary(start) || !s.is_char_boundary(end) {
+                return Some(Value::nil());
+            }
+            let sub = &s[start..end];
             let bytes = sub.as_bytes().to_vec();
             match self.heap.alloc(bytes.len() + 1, HeapTypeTag::String) {
                 Some(ptr) => {
