@@ -137,6 +137,25 @@ mod budget_tests {
     }
 
     #[test]
+    fn test_token_budget_large_charge_never_wraps_or_panics() {
+        let budget = TokenBudget::new(u64::MAX);
+        budget.charge(u64::MAX - 1);
+        budget.charge(100);
+        assert_eq!(budget.consumed(), u64::MAX);
+        assert_eq!(budget.remaining(), 0);
+        assert!(budget.is_exhausted());
+    }
+
+    #[test]
+    fn test_token_budget_large_charge_respects_smaller_limit() {
+        let budget = TokenBudget::new(100);
+        budget.charge(99);
+        budget.charge(u64::MAX);
+        assert_eq!(budget.consumed(), 100);
+        assert!(budget.is_exhausted());
+    }
+
+    #[test]
     fn test_token_budget_concurrent_charges() {
         use std::sync::Arc;
         use std::thread;
