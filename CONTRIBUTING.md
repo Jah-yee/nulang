@@ -33,8 +33,9 @@ Clippy, optional-feature checks, and additional release/documentation checks.
 
 Before opening a pull request, run `bash scripts/ci-local.sh` (or
 `bash scripts/ci-local.sh --full` for the comprehensive local matrix).
-Merge protection should require GitHub Actions checks rather than checks from
-retired external CI providers. Performance benchmarks are maintained in
+Woodpecker and Buildkite are retired from repository CI. Merge protection
+should require GitHub Actions checks only; remove any old external CI checks
+from repository branch protection. Performance benchmarks are maintained in
 separate GitHub Actions workflows.
 
 ## Commit style

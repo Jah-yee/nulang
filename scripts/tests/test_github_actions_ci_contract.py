@@ -39,6 +39,20 @@ class GitHubActionsCIContractTests(unittest.TestCase):
         self.assertIn("cargo test --locked --no-default-features", source)
         self.assertIn("cargo clippy --locked --all-targets", source)
 
+    def test_retired_external_ci_configs_are_not_restored(self):
+        for retired_path in (
+            ".woodpecker/rust.yml",
+            ".buildkite/pipeline.yml",
+            "ci.yml",
+            "scripts/ci/buildkite-rust-static.sh",
+            "scripts/ci/buildkite-rust-tests.sh",
+        ):
+            with self.subTest(path=retired_path):
+                self.assertFalse(
+                    (ROOT / retired_path).exists(),
+                    f"retired CI configuration reintroduced: {retired_path}",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
