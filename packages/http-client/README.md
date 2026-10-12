@@ -56,7 +56,8 @@ Each call above performs **its own HTTP request**; choose one or the other.
 Do not call both on a non-idempotent operation.
 
 - `send_response` preserves status (including 4xx/5xx), headers, and
-  UTF-8 response body. Both functions return `nil` for invalid requests,
+  UTF-8 response body. `send_request` returns `nil` on non-2xx status to
+  preserve the legacy body-only behavior. Both functions return `nil` for invalid requests,
   transport failures, binary responses, or body-size limits.
 - Supported methods: GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS.
 - No automatic redirects or retries, including on requests carrying credentials.
