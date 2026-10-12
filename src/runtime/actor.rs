@@ -239,6 +239,49 @@ pub struct HibernationState {
     pub state_fields: HashMap<String, Value>,
 }
 
+/// Cold, workflow-only query handlers. Idle actors store only a nullable
+/// pointer; the HashMap is allocated on the first registration rather than
+/// embedding its three-word hashbrown bookkeeping in every Actor.
+///
+/// The storage is intentionally discarded on pooled-actor reset so an actor
+/// cannot accidentally inherit another actor's ephemeral query handlers.
+#[derive(Debug, Default)]
+pub struct LazyQueryHandlers {
+    inner: Option<Box<HashMap<String, Value>>>,
+}
+
+impl LazyQueryHandlers {
+    /// Lookups never allocate or change the idle actor footprint.
+    pub fn get(&self, name: &str) -> Option<&Value> {
+        self.inner.as_ref().and_then(|handlers| handlers.get(name))
+    }
+
+    /// Allocates the map only when the first query handler is registered.
+    pub fn insert(&mut self, name: String, handler: Value) -> Option<Value> {
+        self.inner
+            .get_or_insert_with(|| Box::new(HashMap::new()))
+            .insert(name, handler)
+    }
+
+    /// Empty the map and release its backing allocation on actor reuse.
+    pub fn clear(&mut self) {
+        self.inner = None;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.as_ref().is_none_or(|handlers| handlers.is_empty())
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.as_ref().map_or(0, |handlers| handlers.len())
+    }
+
+    /// Reports whether the optional backing HashMap has been allocated.
+    pub fn is_allocated(&self) -> bool {
+        self.inner.is_some()
+    }
+}
+
 /// An actor: independent unit of computation with isolated state and mailbox.
 pub struct Actor {
     pub id: u64,
@@ -331,7 +374,7 @@ pub struct Actor {
     /// with the actor bound as `self`, or a plain value returned as-is.
     /// Handlers are ephemeral: they are not journaled and must be
     /// re-registered after a node restart.
-    pub query_handlers: HashMap<String, Value>,
+    pub query_handlers: LazyQueryHandlers,
     /// True if this actor was generated from an `agent` declaration.
     pub is_agent: bool,
     /// Spawn-time capability manifest (canonical tokens such as
@@ -467,7 +510,7 @@ impl Actor {
             suspended_execution: None,
             waiting_signal: None,
             received_signals: Vec::new(),
-            query_handlers: HashMap::new(),
+            query_handlers: LazyQueryHandlers::default(),
             is_agent: false,
             capabilities: std::collections::BTreeSet::new(),
             backend: ActorBackend::default(),
