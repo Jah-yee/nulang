@@ -43,6 +43,10 @@ python3 scripts/cross_runtime_bench.py \
   --output /tmp/nulang-otp-actors.json
 ```
 
+Each measured runtime process has a default 120-second wall-clock timeout
+(`--timeout-seconds` overrides it). A deadlocked fixture fails the run
+instead of leaving CI hung without a measurement.
+
 The runner **fails closed** when a fixture emits a missing or duplicate
 workload, an incorrect logical-message count, or a non-positive duration.
 Benchmark source files and their exact message-count definitions must be
