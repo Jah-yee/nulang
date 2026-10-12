@@ -169,14 +169,13 @@ mod tests {
     }
 
     /// Real VM failed-step checkpoint injection: terminal event append succeeds
-    /// but the following legacy snapshot commit is rejected. Command admission, suspension journaling, and the
-    /// actor's initial checkpoint still use the real shared memory backend.
+    /// but the following legacy snapshot commit is rejected. The initial
+    /// checkpoint is created before this store is installed.
     #[derive(Clone)]
     struct RejectStepFailedCheckpointStore(SharedMemoryStore);
 
     impl PersistenceStore for RejectStepFailedCheckpointStore {
-        fn save_snapshot(&mut self, snapshot: ActorSnapshot) -> std::io::Result<()> {
-            let _ = snapshot;
+        fn save_snapshot(&mut self, _snapshot: ActorSnapshot) -> std::io::Result<()> {
             Err(std::io::Error::other("injected failed-step checkpoint rejection"))
         }
         fn load_snapshot(&self, actor_id: u64) -> Option<ActorSnapshot> {
@@ -8665,8 +8664,7 @@ match { a: 2, b: 9 } with {
         };
         let actor_id = value.as_actor_id().expect("spawn should return actor ref");
         let safe = backing.load_snapshot(actor_id).expect("initial durable snapshot");
-        rt.borrow_mut().persistence =
-            Box::new(RejectStepFailedCheckpointStore(backing.clone()));
+        rt.borrow_mut().persistence = Box::new(RejectStepFailedCheckpointStore(backing.clone()));
 
         rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
         rt.borrow_mut().run_scheduler();
@@ -8686,10 +8684,7 @@ match { a: 2, b: 9 } with {
             recovered.sequence, safe.sequence,
             "failure checkpoint must not publish speculative state"
         );
-        assert_eq!(
-            recovered.state.get("answer"),
-            safe.state.get("answer")
-        );
+        assert_eq!(recovered.state.get("answer"), safe.state.get("answer"));
         assert!(
             rt.borrow_mut().recover_actor(actor_id).is_none(),
             "orphan StepFailed history beyond the safe snapshot must fail closed"
