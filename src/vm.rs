@@ -1243,12 +1243,16 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
             if start < 0 || len < 0 {
                 return Some(Value::nil());
             }
-            let start = start as usize;
+            // An i64 offset need not fit usize on 32-bit hosts. Refuse an
+            // unrepresentable start and saturate an oversized requested span.
+            let Ok(start) = usize::try_from(start) else {
+                return Some(Value::nil());
+            };
             if start > s.len() {
                 return Some(Value::nil());
             }
-            // Avoid signed overflow for large length arguments.
-            let end = start.saturating_add(len as usize).min(s.len());
+            let len = usize::try_from(len).unwrap_or(usize::MAX);
+            let end = start.saturating_add(len).min(s.len());
             if !s.is_char_boundary(start) || !s.is_char_boundary(end) {
                 return Some(Value::nil());
             }
