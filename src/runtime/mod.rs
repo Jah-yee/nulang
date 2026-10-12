@@ -3266,8 +3266,7 @@ impl Runtime {
         // Bound maintenance latency for timers, send failures, and custom
         // transports that cannot signal incoming work. TCP arrivals wake
         // immediately via the transport's inbound channel.
-        const MAINTENANCE_INTERVAL: std::time::Duration =
-            std::time::Duration::from_millis(10);
+        const MAINTENANCE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
         loop {
             self.process_network();
             self.run_scheduler();
