@@ -12394,6 +12394,34 @@ match { a: 2, b: 9 } with {
     }
 
     #[test]
+    fn test_workflow_declared_state_rejects_mismatched_step_assignment() {
+        let source = r#"
+            workflow BadMutation {
+                state durable answer: String = ""
+                step write { self.answer = 42 }
+            }
+        "#;
+        assert!(
+            compile_source(source).is_err(),
+            "a workflow must reject assigning Int to a declared durable String field"
+        );
+    }
+
+    #[test]
+    fn test_workflow_declared_local_field_rejects_mismatched_step_assignment() {
+        let source = r#"
+            workflow BadLocalMutation {
+                state local temporary: Int = 0
+                step write { self.temporary = "wrong" }
+            }
+        "#;
+        assert!(
+            compile_source(source).is_err(),
+            "local workflow state must also preserve its declared type"
+        );
+    }
+
+    #[test]
     fn test_workflow_declared_state_type_mismatch_is_rejected() {
         let source = r#"
             workflow BadState {
