@@ -5763,6 +5763,17 @@ mod tests {
     }
 
     #[test]
+    fn test_open_record_annotation_does_not_fix_unrelated_extra_fields() {
+        let src = "fn get_x(p: { x: Int, .. }) -> Int { p.x }\nget_x({ x: 7, y: 42 }) + get_x({ x: 3, label: \"second\" })";
+        let result = check_src(src);
+        assert!(
+            result.is_ok(),
+            "each call should infer its own row tail: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
     fn test_explicit_open_record_requires_declared_field() {
         let src = "fn get_x(p: { x: Int, .. }) -> Int { p.x }\nget_x({ y: 42 })";
         assert!(check_src(src).is_err(), "open record should require x");
