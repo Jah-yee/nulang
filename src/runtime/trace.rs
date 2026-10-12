@@ -255,6 +255,53 @@ mod tests {
     }
 
     #[test]
+    fn incoming_http_traceparent_is_case_insensitive_and_rejects_duplicates() {
+        let headers = vec![
+            ("Content-Type".to_owned(), "application/json".to_owned()),
+            ("TrAcEpArEnT".to_owned(), " 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01 ".to_owned()),
+        ];
+        let parent = TraceContext::from_http_headers(&headers).expect("valid HTTP parent");
+        assert_eq!(parent.trace_id(), 0x4bf92f3577b34da6a3ce929d0e0e4736);
+        assert_eq!(parent.span_id(), 0x00f067aa0ba902b7);
+        assert!(TraceContext::from_http_headers(&headers[..1]).is_none());
+        let mut duplicate = headers.clone();
+        duplicate.push(("traceparent".to_string(), headers[1].1.clone()));
+        assert!(TraceContext::from_http_headers(&duplicate).is_none());
+        let invalid = vec![("traceparent".to_string(), "malformed".to_string())];
+        assert!(TraceContext::from_http_headers(&invalid).is_none());
+    }
+
+    #[cfg(feature = "otel")]
+    #[test]
+    fn exported_actor_span_reuses_actual_otel_identity_for_outgoing_messages() {
+        use opentelemetry::trace::{TraceContextExt as _, TracerProvider as _};
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+        use tracing_subscriber::prelude::*;
+
+        let provider = opentelemetry_sdk::trace::TracerProvider::builder().build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("nulang-test")));
+        tracing::subscriber::with_default(subscriber, || {
+            let parent = TraceContext::from_traceparent(
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+            ).unwrap();
+            let child = parent.child();
+            let (guard, emitted) = child.enter_dispatch_span_with_context(17, 2);
+            let _guard = guard.expect("TRACE subscriber enables actor span");
+            let active = tracing::Span::current().context();
+            let actual_span = active.span();
+            let context = actual_span.span_context();
+            assert!(context.is_valid());
+            assert_eq!(context.trace_id().to_bytes(), parent.trace_id().to_be_bytes());
+            assert_eq!(context.span_id().to_bytes(), emitted.span_id().to_be_bytes());
+            assert_eq!(emitted.parent_span_id(), parent.span_id());
+            assert_ne!(emitted.span_id(), parent.span_id());
+            assert_eq!(emitted.to_traceparent(),
+                format!("00-{:032x}-{:016x}-01", parent.trace_id(), emitted.span_id()));
+        });
+    }
+
+    #[test]
     fn test_root_ids_are_nonzero_and_distinct() {
         let a = TraceContext::root();
         let b = TraceContext::root();
