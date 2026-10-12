@@ -7918,6 +7918,26 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_python_import_effect_operation() {
+        // `import` is a declaration keyword, but it is also the registered
+        // name of the Python.import effect operation. Its use after the dot
+        // must not be rejected as a keyword in expression position.
+        let expr = parse_expr("perform Python.import(\"math\")").unwrap();
+        match expr {
+            Expr::Perform { effect, op, args, .. } => {
+                assert_eq!(effect, "Python");
+                assert_eq!(op, "import");
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("Expected Python.import perform, got {:?}", other),
+        }
+
+        // Allowing the effect operation must not break declaration imports.
+        let module = parse("import stdlib::math").unwrap();
+        assert!(matches!(module.decls.first(), Some(Decl::Import { .. })));
+    }
+
+    #[test]
     fn test_parse_perform_keyword_ops() {
         // `link`, `monitor` and `exit` are reserved keywords; they must still
         // parse as effect operation names (BEAM Actor.* builtin effects).
