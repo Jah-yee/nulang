@@ -9035,7 +9035,7 @@ fn confirmed_node_removal_forgets_crdt_receiver_knowledge() {
     );
 }
 
- 
+
 /// Reject only durable saga receipts so the test can distinguish a completed
 /// compensation body from acknowledgement in the persistence layer.
 struct RejectSagaReceiptStore {
