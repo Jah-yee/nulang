@@ -8739,6 +8739,7 @@ match { a: 2, b: 9 } with {
                     {
                         perform Signal.wait("go")
                         self.answer = "speculative"
+                        self.step_index = self.step_index + 4
                         let m: Maybe[Int] = None in
                         match m { | Some(x) => x }
                     }
@@ -8798,6 +8799,7 @@ match { a: 2, b: 9 } with {
                     {
                         perform Timer.sleep(50)
                         self.answer = "speculative"
+                        self.step_index = self.step_index + 4
                         let m: Maybe[Int] = None in
                         match m { | Some(x) => x }
                     }
@@ -8857,6 +8859,7 @@ match { a: 2, b: 9 } with {
                         self.answer = receive {
                             | fail_step() => 1
                         } after 50 => 4242
+                        self.step_index = self.step_index + 4
                         let m: Maybe[Int] = None in
                         match m { | Some(x) => x }
                     }
@@ -8915,6 +8918,7 @@ match { a: 2, b: 9 } with {
                 step fail_step {
                     {
                         self.answer = perform Inference.ask("hello")
+                        self.step_index = self.step_index + 4
                         let m: Maybe[Int] = None in
                         match m { | Some(x) => x }
                     }
