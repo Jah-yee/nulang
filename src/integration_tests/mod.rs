@@ -8583,6 +8583,11 @@ match { a: 2, b: 9 } with {
     fn test_workflow_immediate_failed_step_append_failure_quarantines_actor() {
         let source = r#"
             workflow FailureRejectTerminal {
+                step prepare {
+                    (self.step_index = self.step_index + 1, self.prepared = 1)
+                } compensate {
+                    self.comp_order = self.comp_order * 10 + 1
+                }
                 step fail_step {
                     {
                         self.answer = "uncommitted"
@@ -8606,9 +8611,17 @@ match { a: 2, b: 9 } with {
             vm.run().unwrap()
         };
         let actor_id = value.as_actor_id().expect("spawn should return actor ref");
-        let safe = backing.load_snapshot(actor_id).expect("initial durable snapshot");
-
         rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        rt.borrow_mut().run_scheduler();
+        assert!(
+            backing.read_workflow_events(actor_id).iter().any(|event| {
+                matches!(event, WorkflowEvent::StepCompleted { step_name, .. } if step_name == "prepare")
+            }),
+            "compensatable prepare step must commit before injecting failed-step fault"
+        );
+        let safe = backing.load_snapshot(actor_id).expect("completed prepare checkpoint");
+
+        rt.borrow_mut().send_message_by_id(actor_id, 1, &[]);
         rt.borrow_mut().run_scheduler();
 
         assert!(
@@ -8620,6 +8633,12 @@ match { a: 2, b: 9 } with {
                 matches!(event, WorkflowEvent::StepFailed { .. })
             }),
             "rejected failure event must not appear in persisted history"
+        );
+        assert!(
+            !backing.read_workflow_events(actor_id).iter().any(|event| {
+                matches!(event, WorkflowEvent::SagaCompensated { .. })
+            }),
+            "compensation must not run when failed-step terminal persistence is rejected"
         );
         let recovered = backing.load_snapshot(actor_id).expect("safe snapshot remains");
         assert_eq!(
@@ -8640,6 +8659,11 @@ match { a: 2, b: 9 } with {
     fn test_workflow_immediate_failed_step_checkpoint_failure_quarantines_actor() {
         let source = r#"
             workflow FailureCheckpointRejected {
+                step prepare {
+                    (self.step_index = self.step_index + 1, self.prepared = 1)
+                } compensate {
+                    self.comp_order = self.comp_order * 10 + 1
+                }
                 step fail_step {
                     {
                         self.answer = "uncommitted"
@@ -8663,10 +8687,18 @@ match { a: 2, b: 9 } with {
             vm.run().unwrap()
         };
         let actor_id = value.as_actor_id().expect("spawn should return actor ref");
-        let safe = backing.load_snapshot(actor_id).expect("initial durable snapshot");
+        rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        rt.borrow_mut().run_scheduler();
+        assert!(
+            backing.read_workflow_events(actor_id).iter().any(|event| {
+                matches!(event, WorkflowEvent::StepCompleted { step_name, .. } if step_name == "prepare")
+            }),
+            "compensatable prepare step must commit before injecting failed-step fault"
+        );
+        let safe = backing.load_snapshot(actor_id).expect("completed prepare checkpoint");
         rt.borrow_mut().persistence = Box::new(RejectStepFailedCheckpointStore(backing.clone()));
 
-        rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        rt.borrow_mut().send_message_by_id(actor_id, 1, &[]);
         rt.borrow_mut().run_scheduler();
 
         assert!(
@@ -8678,6 +8710,12 @@ match { a: 2, b: 9 } with {
                 matches!(event, WorkflowEvent::StepFailed { .. })
             }),
             "the injected checkpoint failure must occur after StepFailed append"
+        );
+        assert!(
+            !backing.read_workflow_events(actor_id).iter().any(|event| {
+                matches!(event, WorkflowEvent::SagaCompensated { .. })
+            }),
+            "compensation must not run when failed-step terminal persistence is rejected"
         );
         let recovered = backing.load_snapshot(actor_id).expect("safe snapshot remains");
         assert_eq!(
