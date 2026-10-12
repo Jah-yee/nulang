@@ -3615,11 +3615,16 @@ fn repeated_foreign_pointer_deliveries_take_one_receiver_hold() {
     // All 128 in-flight send credits must have drained; a long-lived actor
     // must retain only one hold on this object after consuming the messages.
     let header = unsafe { &*ActorHeap::header_of(ptr) };
-    assert_eq!(header.foreign_count, 1, "repeated deliveries must share one receiver hold");
+    assert_eq!(
+        header.foreign_count, 1,
+        "repeated deliveries must share one receiver hold"
+    );
 
     // The receiver's hold protects the object after the sender's last drop.
     let owner_actor = rt.actors.get_mut(&owner).unwrap();
-    unsafe { owner_actor.orca_gc.drop_local_ref(&mut owner_actor.heap, ptr) };
+    unsafe {
+        owner_actor.orca_gc.drop_local_ref(&mut owner_actor.heap, ptr);
+    }
     assert_eq!(owner_actor.heap.live_count(), 1);
 
     rt.exit_actor(receiver, ExitReason::Normal);
@@ -3631,8 +3636,8 @@ fn repeated_foreign_pointer_deliveries_take_one_receiver_hold() {
     );
 }
 
-/// Foreign holds are per (owning actor, object), not shared across different
-/// receivers or different objects. The sender may exit before either receiver.
+/// Foreign holds are scoped to each receiving actor. A sender can exit
+/// before the receivers without invalidating their distinct holds.
 #[test]
 fn foreign_hold_dedup_preserves_distinct_receivers_and_retired_heap() {
     let mut rt = Runtime::new();
