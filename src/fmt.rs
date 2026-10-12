@@ -29,12 +29,52 @@ pub fn format_source(source: &str) -> Result<String, String> {
         fmt_decl(&mut out, decl, 0, &mut had_unhandled);
     }
     if had_unhandled {
-        return Err("file contains constructs not yet supported by the formatter (e.g. workflow, agent, let-binding, class, impl). The file was not modified.".to_string());
+        return Err("formatting refused: an unsupported construct cannot be preserved safely; the file was not modified".to_string());
     }
     if !out.ends_with('\n') {
         out.push('\n');
     }
+
+    // The AST printer is not yet lossless: it can omit visibility, generic
+    // parameters, defaults, comments, and other source-level information.
+    // Until a trivia-preserving formatter is available, refuse any rewrite
+    // that changes a significant token (including comments and literals).
+    // Newlines are allowed to change because formatting adjusts layout.
+    if significant_tokens(source)? != significant_tokens(&out)? {
+        return Err(
+            "formatting refused: output would change or remove source tokens; the file was not modified".to_string(),
+        );
+    }
+    // Token equivalence is necessary but not sufficient: always require the
+    // formatted program to parse successfully before returning any edits.
+    let tokens = crate::lexer::Lexer::new(&out)
+        .lex()
+        .map_err(|e| format!("formatted source is not lexically valid: {e}"))?;
+    crate::parser::Parser::new(tokens)
+        .parse_module()
+        .map_err(|e| format!("formatted source does not parse: {e}"))?;
     Ok(out)
+}
+
+/// Compare semantic tokens and source comments while ignoring layout newlines.
+/// This guard deliberately errs on the side of rejecting valid formatting.
+fn significant_tokens(source: &str) -> Result<Vec<crate::lexer::TokenKind>, String> {
+    use crate::lexer::TokenKind;
+    if source.starts_with("#!") {
+        return Err("formatting refused: shebangs are not yet preserved".to_string());
+    }
+    crate::lexer::Lexer::new(source)
+        .lex_with_comments()
+        .map(|tokens| {
+            tokens
+                .into_iter()
+                .filter_map(|t| match t.kind {
+                    TokenKind::Newline | TokenKind::Eof => None,
+                    kind => Some(kind),
+                })
+                .collect()
+        })
+        .map_err(|e| e.to_string())
 }
 
 /// Recursively format all `.nula` files under `dir`.
