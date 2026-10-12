@@ -2808,6 +2808,42 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_selected_entrypoint_replaces_main_in_ast_without_source_rewrite() {
+        let source = "fn main() { 999 }\\nfn test_pass() { 42 }\\n";
+        let tokens = Lexer::new(source).lex().expect("tokens");
+        let mut ast = Parser::new(tokens).parse_module().expect("ast");
+        select_test_entry(&mut ast, "test_pass").expect("select test");
+        let main_functions: Vec<_> = ast
+            .decls
+            .iter()
+            .filter(|decl| matches!(decl, nulang::ast::Decl::Function { name, .. } if name == "main"))
+            .collect();
+        assert_eq!(main_functions.len(), 1, "exactly one entry point");
+        let nulang::ast::Decl::Function { body, .. } = main_functions[0] else {
+            panic!("expected function declaration");
+        };
+        assert!(matches!(
+            body,
+            nulang::ast::Expr::App { func, args, .. }
+                if args.is_empty() && matches!(func.as_ref(), nulang::ast::Expr::Var(name, _) if name == "test_pass")
+        ));
+        assert!(source.contains("999"), "test selection must not edit source");
+    }
+
+    #[test]
+    fn test_selected_entrypoint_rejects_unknown_and_parameterized_tests() {
+        let source = "fn test_with_arg(x: Int) { x }\\n";
+        let tokens = Lexer::new(source).lex().expect("tokens");
+        let original = Parser::new(tokens).parse_module().expect("ast");
+        let mut ast = original.clone();
+        assert!(select_test_entry(&mut ast, "test_missing").is_err());
+        assert_eq!(ast, original, "failed selection must not modify the AST");
+        assert!(select_test_entry(&mut ast, "test_with_arg").is_err());
+        assert_eq!(ast, original, "invalid test signature must leave AST intact");
+    }
+
+
     /// An actor program run through the CLI path must create real actors
     /// and deliver sent messages: with the bare standalone VM the stub
     /// spawn/send callbacks would leave the counter at 0.
