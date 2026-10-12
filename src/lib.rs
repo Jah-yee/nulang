@@ -18,8 +18,6 @@ pub mod authority_host;
 mod authority_runtime;
 pub use authority_runtime::RuntimeAuthorityError;
 pub mod backends;
-#[cfg(feature = "ureq")]
-pub mod http_outbound;
 pub mod behavior_manifest;
 #[cfg(test)]
 pub mod benchmarks;
@@ -57,6 +55,8 @@ pub mod fuzz;
 pub mod hir;
 pub mod hir_lower;
 pub mod host_effect_abi;
+#[cfg(feature = "ureq")]
+pub mod http_outbound;
 pub mod integration_tests;
 pub mod iso_arena;
 #[cfg(feature = "native-codegen")]

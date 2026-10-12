@@ -2930,25 +2930,41 @@ mod host_authority_tests {
         actor.install_authority_manifest(&manifest);
         rt.actors.insert(actor_id, actor);
 
-        let (constants, regs) = string_args(&[
-            "PATCH", "https://api.example.com/v1/users", "[]", "body"
-        ]);
+        let (constants, regs) =
+            string_args(&["PATCH", "https://api.example.com/v1/users", "[]", "body"]);
         assert!(authorize_actor_host_effect(
-            &rt, Some(actor_id), "Http", Some("request"), &constants, &regs
-        ).is_ok());
+            &rt,
+            Some(actor_id),
+            "Http",
+            Some("request"),
+            &constants,
+            &regs
+        )
+        .is_ok());
 
-        let (constants, regs) = string_args(&[
-            "GET", "https://api.example.com:8443/private", "[]", ""
-        ]);
+        let (constants, regs) =
+            string_args(&["GET", "https://api.example.com:8443/private", "[]", ""]);
         assert!(authorize_actor_host_effect(
-            &rt, Some(actor_id), "Http", Some("request"), &constants, &regs
-        ).is_err());
+            &rt,
+            Some(actor_id),
+            "Http",
+            Some("request"),
+            &constants,
+            &regs
+        )
+        .is_err());
 
         // Malformed/truncated new-effect invocations cannot bypass authority.
         let (constants, regs) = string_args(&["GET"]);
         assert!(authorize_actor_host_effect(
-            &rt, Some(actor_id), "Http", Some("request"), &constants, &regs
-        ).is_err());
+            &rt,
+            Some(actor_id),
+            "Http",
+            Some("request"),
+            &constants,
+            &regs
+        )
+        .is_err());
     }
 
     #[test]

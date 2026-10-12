@@ -23,7 +23,10 @@ pub fn request_text(
     headers_json: &str,
     body: &str,
 ) -> Result<String, String> {
-    if !matches!(method, "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS") {
+    if !matches!(
+        method,
+        "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS"
+    ) {
         return Err("Http.request: unsupported HTTP method".to_string());
     }
     let authority = url
@@ -31,7 +34,8 @@ pub fn request_text(
         .or_else(|| url.strip_prefix("http://"))
         .and_then(|suffix| suffix.split(['/', '?', '#']).next())
         .ok_or_else(|| "Http.request: URL must be HTTP(S)".to_string())?;
-    if authority.is_empty() || authority.contains('@') || authority.chars().any(char::is_whitespace) {
+    if authority.is_empty() || authority.contains('@') || authority.chars().any(char::is_whitespace)
+    {
         return Err("Http.request: invalid URL authority".to_string());
     }
     if body.len() > MAX_BODY_BYTES {
@@ -40,8 +44,9 @@ pub fn request_text(
     if headers_json.len() > MAX_HEADER_BYTES {
         return Err("Http.request: request headers exceed 64 KiB limit".to_string());
     }
-    let pairs: Vec<(String, String)> = serde_json::from_str(headers_json)
-        .map_err(|_| "Http.request: headers must be a JSON array of [name,value] pairs".to_string())?;
+    let pairs: Vec<(String, String)> = serde_json::from_str(headers_json).map_err(|_| {
+        "Http.request: headers must be a JSON array of [name,value] pairs".to_string()
+    })?;
     if pairs.len() > 100 {
         return Err("Http.request: too many headers".to_string());
     }
@@ -53,18 +58,27 @@ pub fn request_text(
             return Err("Http.request: headers exceed configured limits".to_string());
         }
         if name.is_empty()
-            || !name.as_bytes().iter().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_|~".contains(b) || *b == 0x60)
+            || !name
+                .as_bytes()
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_|~".contains(b) || *b == 0x60)
         {
             return Err("Http.request: invalid header name".to_string());
         }
-        if !value.bytes().all(|b| b == b'\t' || (0x20..=0x7e).contains(&b)) {
+        if !value
+            .bytes()
+            .all(|b| b == b'\t' || (0x20..=0x7e).contains(&b))
+        {
             return Err("Http.request: invalid header value".to_string());
         }
         let lower = name.to_ascii_lowercase();
         if !seen.insert(lower.clone()) {
             return Err("Http.request: duplicate header name".to_string());
         }
-        if matches!(lower.as_str(), "host" | "content-length" | "transfer-encoding" | "connection" | "proxy-authorization") {
+        if matches!(
+            lower.as_str(),
+            "host" | "content-length" | "transfer-encoding" | "connection" | "proxy-authorization"
+        ) {
             return Err("Http.request: transport-managed header cannot be overridden".to_string());
         }
     }
@@ -77,14 +91,15 @@ pub fn request_text(
     for (name, value) in &pairs {
         request = request.set(name, value);
     }
-    let response = match if body.is_empty() && matches!(method, "GET" | "HEAD" | "DELETE" | "OPTIONS") {
-        request.call()
-    } else {
-        request.send_string(body)
-    } {
-        Ok(response) | Err(ureq::Error::Status(_, response)) => response,
-        Err(error) => return Err(format!("Http.request: transport error: {error}")),
-    };
+    let response =
+        match if body.is_empty() && matches!(method, "GET" | "HEAD" | "DELETE" | "OPTIONS") {
+            request.call()
+        } else {
+            request.send_string(body)
+        } {
+            Ok(response) | Err(ureq::Error::Status(_, response)) => response,
+            Err(error) => return Err(format!("Http.request: transport error: {error}")),
+        };
 
     let status = response.status();
     let mut headers = BTreeMap::new();
@@ -94,7 +109,8 @@ pub fn request_text(
         }
     }
     let mut bytes = Vec::new();
-    response.into_reader()
+    response
+        .into_reader()
         .take((MAX_BODY_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|e| format!("Http.request: failed to read response body: {e}"))?;

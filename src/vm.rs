@@ -1552,9 +1552,8 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
                     // Http.request(method, url, headers_json, body).
                     // A successful *HTTP* response is JSON (including non-2xx);
                     // transport/validation failures return nil. No retries or redirects.
-                    let arg = |idx: usize| {
-                        regs.get(idx).map(|v| resolve_value_string(constants, *v))
-                    };
+                    let arg =
+                        |idx: usize| regs.get(idx).map(|v| resolve_value_string(constants, *v));
                     let (Some(method), Some(url), Some(headers), Some(body)) =
                         (arg(0), arg(1), arg(2), arg(3))
                     else {
@@ -1563,24 +1562,30 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
                     #[cfg(feature = "ureq")]
                     {
                         let data = match crate::http_outbound::request_text(
-                            &method, &url, &headers, &body
+                            &method, &url, &headers, &body,
                         ) {
                             Ok(data) => data,
                             Err(_) => return Some(Value::nil()),
                         };
                         let bytes = data.into_bytes();
-                        return Some(match self.heap.alloc(bytes.len() + 1, HeapTypeTag::String) {
-                            Some(ptr) => {
-                                unsafe {
-                                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
-                                    *ptr.add(bytes.len()) = 0;
-                                    // SAFETY: ptr is allocated from this VM-owned heap and
-                                    // remains live for the resulting Value's lifetime.
-                                    Value::ptr(ptr)
+                        return Some(
+                            match self.heap.alloc(bytes.len() + 1, HeapTypeTag::String) {
+                                Some(ptr) => {
+                                    unsafe {
+                                        std::ptr::copy_nonoverlapping(
+                                            bytes.as_ptr(),
+                                            ptr,
+                                            bytes.len(),
+                                        );
+                                        *ptr.add(bytes.len()) = 0;
+                                        // SAFETY: ptr is allocated from this VM-owned heap and
+                                        // remains live for the resulting Value's lifetime.
+                                        Value::ptr(ptr)
+                                    }
                                 }
-                            }
-                            None => Value::nil(),
-                        });
+                                None => Value::nil(),
+                            },
+                        );
                     }
                     #[cfg(not(feature = "ureq"))]
                     {
