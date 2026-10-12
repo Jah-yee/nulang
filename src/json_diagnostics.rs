@@ -169,7 +169,7 @@ fn machine_identifier_replacement(err: &NuError) -> Option<String> {
 
     let missing = msg
         .strip_prefix("Unbound variable: '")?
-        .strip_suffix('\\'')?;
+        .strip_suffix("'")?;
     let [replacement] = candidates.as_slice() else {
         return None;
     };
