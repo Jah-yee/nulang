@@ -143,5 +143,9 @@ pub fn send_response(req) {
 pub fn send_request(req) {
     let response = send_response(req);
     if response == nil then { nil }
-    else { get_string(parse(response), "body", "") }
+    else {
+        let parsed = parse(response);
+        if get_bool(parsed, "ok", false) then { get_string(parsed, "body", "") }
+        else { nil }
+    }
 }
