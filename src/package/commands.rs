@@ -1947,21 +1947,21 @@ fn strip_main_function(source: &str) -> String {
     };
     let significant: Vec<_> = tokens
         .iter()
-        .filter(|t| !matches!(t.kind, TokenKind::Newline | TokenKind::DocComment(_) | TokenKind::Eof))
+        .filter(|t| !matches!(&t.kind, TokenKind::Newline | TokenKind::DocComment(_) | TokenKind::Eof))
         .collect();
     for (i, tokens) in significant.windows(5).enumerate() {
-        if !matches!(tokens[0].kind, TokenKind::Fn)
+        if !matches!(&tokens[0].kind, TokenKind::Fn)
             || !matches!(&tokens[1].kind, TokenKind::Ident(name) if name == "main")
-            || !matches!(tokens[2].kind, TokenKind::LParen)
-            || !matches!(tokens[3].kind, TokenKind::RParen)
-            || !matches!(tokens[4].kind, TokenKind::LBrace)
+            || !matches!(&tokens[2].kind, TokenKind::LParen)
+            || !matches!(&tokens[3].kind, TokenKind::RParen)
+            || !matches!(&tokens[4].kind, TokenKind::LBrace)
         {
             continue;
         }
         let start = tokens[0].span.start as usize;
         let mut depth = 0_usize;
         for token in &significant[i + 4..] {
-            match token.kind {
+            match &token.kind {
                 TokenKind::LBrace => depth += 1,
                 TokenKind::RBrace => {
                     depth -= 1;
