@@ -1,5 +1,6 @@
 import importlib.util
 import pathlib
+import subprocess
 import unittest
 from unittest import mock
 
@@ -68,6 +69,17 @@ class RecordValidationTests(unittest.TestCase):
         data = {"erlang_otp": {"counting": [{"messages": 200000, "elapsed_ns": 0}]}}
         with self.assertRaisesRegex(RuntimeError, "elapsed_ns"):
             bench.summarize(data)
+
+
+class BenchmarkProcessTimeoutTests(unittest.TestCase):
+    def test_measured_process_timeout_is_forwarded_to_subprocess(self):
+        completed = subprocess.CompletedProcess(["fixture"], 0, stdout="ok")
+        with mock.patch.object(bench.subprocess, "run", return_value=completed) as runner:
+            self.assertEqual(
+                "ok",
+                bench.command_output(["fixture"], timeout_seconds=75),
+            )
+        self.assertEqual(75, runner.call_args.kwargs["timeout"])
 
 
 class ErlangOtpBuildPlanTests(unittest.TestCase):
