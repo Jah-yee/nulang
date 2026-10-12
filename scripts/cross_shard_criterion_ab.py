@@ -20,9 +20,16 @@ import sys
 import tempfile
 from pathlib import Path
 
+# When unittest imports this script through importlib, its directory is not
+# automatically added to sys.path. Keep the neighboring benchmark helper
+# import working both as a CLI and as an imported test subject.
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
 import confirm_bench_regression as shared
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = SCRIPT_DIR.parent
 BENCHMARKS = tuple(f"actor/cross_shard_enqueue_by_id/{n}" for n in (0, 1, 4, 5, 16))
 GROUP = "actor/cross_shard_enqueue_by_id"
 
