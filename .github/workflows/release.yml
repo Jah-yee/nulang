@@ -109,7 +109,7 @@ jobs:
           # /usr/include/stdint.h and fail on bits/libc-header-start.h.
           sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross libssl-dev:arm64 pkg-config
           # Fail early if the compiler cannot find target libc headers.
-          printf '#include <stdint.h>\nint main(void) { return (int)sizeof(uint64_t); }\n' \\
+          printf '#include <stdint.h>\nint main(void) { return (int)sizeof(uint64_t); }\n' \
             | aarch64-linux-gnu-gcc -x c -c - -o "$RUNNER_TEMP/nulang-arm64-libc-smoke.o"
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
           echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV
