@@ -8765,7 +8765,10 @@ fn resumed_workflow_failed_step_records_terminal_and_snapshot() {
         }) if step_name == "wait" && error == "injected VM failure"
     ));
     let committed = rt.persistence.load_snapshot(actor_id).unwrap();
-    assert_eq!(committed.state.get("step_index"), Some(&PersistedValue::Int(0)));
+    assert_eq!(
+        committed.state.get("step_index"),
+        Some(&PersistedValue::Int(0))
+    );
     assert_eq!(committed.waiting_signal, None);
     assert!(rt.actors.contains_key(&actor_id));
 }
@@ -8802,7 +8805,11 @@ fn resumed_workflow_failed_step_checkpoint_rejection_quarantines_actor() {
         Some(WorkflowEvent::StepFailed { step_name, .. }) if step_name == "wait"
     ));
     assert_eq!(
-        rt.persistence.load_snapshot(actor_id).unwrap().state.get("step_index"),
+        rt.persistence
+            .load_snapshot(actor_id)
+            .unwrap()
+            .state
+            .get("step_index"),
         Some(&PersistedValue::Int(0)),
         "failed checkpoint must not expose speculative resumed-state mutation"
     );

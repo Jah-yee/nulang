@@ -176,7 +176,9 @@ mod tests {
 
     impl PersistenceStore for RejectStepFailedCheckpointStore {
         fn save_snapshot(&mut self, _snapshot: ActorSnapshot) -> std::io::Result<()> {
-            Err(std::io::Error::other("injected failed-step checkpoint rejection"))
+            Err(std::io::Error::other(
+                "injected failed-step checkpoint rejection",
+            ))
         }
         fn load_snapshot(&self, actor_id: u64) -> Option<ActorSnapshot> {
             self.0.load_snapshot(actor_id)
@@ -8591,12 +8593,10 @@ match { a: 2, b: 9 } with {
                 step fail_step {
                     {
                         self.answer = "uncommitted"
-                        let m: Maybe[Int] = None in
-                        match m { | Some(x) => x }
+                        perform Fail.now()
                     }
                 }
             }
-            type Maybe[V] = Some(V) | None
             let w = spawn FailureRejectTerminal {} in { w }
         "#;
         let backing = SharedMemoryStore::new();
@@ -8619,7 +8619,9 @@ match { a: 2, b: 9 } with {
             }),
             "compensatable prepare step must commit before injecting failed-step fault"
         );
-        let safe = backing.load_snapshot(actor_id).expect("completed prepare checkpoint");
+        let safe = backing
+            .load_snapshot(actor_id)
+            .expect("completed prepare checkpoint");
 
         rt.borrow_mut().send_message_by_id(actor_id, 1, &[]);
         rt.borrow_mut().run_scheduler();
@@ -8629,18 +8631,22 @@ match { a: 2, b: 9 } with {
             "rejected StepFailed must quarantine the speculative failed activation"
         );
         assert!(
-            !backing.read_workflow_events(actor_id).iter().any(|event| {
-                matches!(event, WorkflowEvent::StepFailed { .. })
-            }),
+            !backing
+                .read_workflow_events(actor_id)
+                .iter()
+                .any(|event| { matches!(event, WorkflowEvent::StepFailed { .. }) }),
             "rejected failure event must not appear in persisted history"
         );
         assert!(
-            !backing.read_workflow_events(actor_id).iter().any(|event| {
-                matches!(event, WorkflowEvent::SagaCompensated { .. })
-            }),
+            !backing
+                .read_workflow_events(actor_id)
+                .iter()
+                .any(|event| { matches!(event, WorkflowEvent::SagaCompensated { .. }) }),
             "compensation must not run when failed-step terminal persistence is rejected"
         );
-        let recovered = backing.load_snapshot(actor_id).expect("safe snapshot remains");
+        let recovered = backing
+            .load_snapshot(actor_id)
+            .expect("safe snapshot remains");
         assert_eq!(
             recovered.sequence, safe.sequence,
             "failed step must not checkpoint before its terminal event commits"
@@ -8667,12 +8673,10 @@ match { a: 2, b: 9 } with {
                 step fail_step {
                     {
                         self.answer = "uncommitted"
-                        let m: Maybe[Int] = None in
-                        match m { | Some(x) => x }
+                        perform Fail.now()
                     }
                 }
             }
-            type Maybe[V] = Some(V) | None
             let w = spawn FailureCheckpointRejected {} in { w }
         "#;
         let backing = SharedMemoryStore::new();
@@ -8695,7 +8699,9 @@ match { a: 2, b: 9 } with {
             }),
             "compensatable prepare step must commit before injecting failed-step fault"
         );
-        let safe = backing.load_snapshot(actor_id).expect("completed prepare checkpoint");
+        let safe = backing
+            .load_snapshot(actor_id)
+            .expect("completed prepare checkpoint");
         rt.borrow_mut().persistence = Box::new(RejectStepFailedCheckpointStore(backing.clone()));
 
         rt.borrow_mut().send_message_by_id(actor_id, 1, &[]);
@@ -8706,18 +8712,22 @@ match { a: 2, b: 9 } with {
             "a failed terminal checkpoint must quarantine the live workflow"
         );
         assert!(
-            backing.read_workflow_events(actor_id).iter().any(|event| {
-                matches!(event, WorkflowEvent::StepFailed { .. })
-            }),
+            backing
+                .read_workflow_events(actor_id)
+                .iter()
+                .any(|event| { matches!(event, WorkflowEvent::StepFailed { .. }) }),
             "the injected checkpoint failure must occur after StepFailed append"
         );
         assert!(
-            !backing.read_workflow_events(actor_id).iter().any(|event| {
-                matches!(event, WorkflowEvent::SagaCompensated { .. })
-            }),
+            !backing
+                .read_workflow_events(actor_id)
+                .iter()
+                .any(|event| { matches!(event, WorkflowEvent::SagaCompensated { .. }) }),
             "compensation must not run when failed-step terminal persistence is rejected"
         );
-        let recovered = backing.load_snapshot(actor_id).expect("safe snapshot remains");
+        let recovered = backing
+            .load_snapshot(actor_id)
+            .expect("safe snapshot remains");
         assert_eq!(
             recovered.sequence, safe.sequence,
             "failure checkpoint must not publish speculative state"
@@ -8745,12 +8755,10 @@ match { a: 2, b: 9 } with {
                         perform Signal.wait("go")
                         self.answer = "speculative"
                         self.step_index = self.step_index + 4
-                        let m: Maybe[Int] = None in
-                        match m { | Some(x) => x }
+                        perform Fail.now()
                     }
                 }
             }
-            type Maybe[V] = Some(V) | None
             let w = spawn SignalResumeFails {} in { w }
         "#;
         let backing = SharedMemoryStore::new();
@@ -8776,34 +8784,52 @@ match { a: 2, b: 9 } with {
         rt.borrow_mut().send_message_by_id(actor_id, 1, &[]);
         rt.borrow_mut().run_scheduler();
         assert_eq!(
-            rt.borrow().actors.get(&actor_id).unwrap().waiting_signal.as_deref(),
+            rt.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .waiting_signal
+                .as_deref(),
             Some("go"),
         );
-        rt.borrow_mut().signal_workflow(actor_id, "go", None).unwrap();
+        rt.borrow_mut()
+            .signal_workflow(actor_id, "go", None)
+            .unwrap();
 
         assert!(
             !rt.borrow().actors.contains_key(&actor_id),
             "signal resumed failure must quarantine after terminal append rejection"
         );
         assert!(
-            !backing.read_workflow_events(actor_id).iter().any(|event| {
-                matches!(event, WorkflowEvent::StepFailed { .. })
-            }),
+            !backing
+                .read_workflow_events(actor_id)
+                .iter()
+                .any(|event| { matches!(event, WorkflowEvent::StepFailed { .. }) }),
             "rejected StepFailed must not appear in committed history"
         );
         assert!(
-            !backing.read_workflow_events(actor_id).iter().any(|event| {
-                matches!(event, WorkflowEvent::SagaCompensated { .. })
-            }),
+            !backing
+                .read_workflow_events(actor_id)
+                .iter()
+                .any(|event| { matches!(event, WorkflowEvent::SagaCompensated { .. }) }),
             "rejected StepFailed must not trigger compensation"
         );
         assert_eq!(
-            backing.load_snapshot(actor_id).unwrap().state.get("step_index"),
+            backing
+                .load_snapshot(actor_id)
+                .unwrap()
+                .state
+                .get("step_index"),
             Some(&crate::runtime::PersistedValue::Int(1)),
             "terminal failure must preserve the completed prepare step"
         );
         assert!(
-            backing.load_snapshot(actor_id).unwrap().state.get("answer").is_none(),
+            backing
+                .load_snapshot(actor_id)
+                .unwrap()
+                .state
+                .get("answer")
+                .is_none(),
             "speculative resumed mutation must not be checkpointed"
         );
     }
@@ -8842,12 +8868,19 @@ match { a: 2, b: 9 } with {
         rt.borrow_mut().send_message_by_id(actor_id, 1, &[]);
         rt.borrow_mut().run_scheduler();
         assert_eq!(
-            rt.borrow().actors.get(&actor_id).unwrap().waiting_signal.as_deref(),
+            rt.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .waiting_signal
+                .as_deref(),
             Some("go"),
             "the failing step must first suspend"
         );
 
-        rt.borrow_mut().signal_workflow(actor_id, "go", None).unwrap();
+        rt.borrow_mut()
+            .signal_workflow(actor_id, "go", None)
+            .unwrap();
         let events = backing.read_workflow_events(actor_id);
         let failed = events.iter().position(|event| {
             matches!(event, WorkflowEvent::StepFailed { step_name, .. } if step_name == "fail_step")
@@ -8877,12 +8910,10 @@ match { a: 2, b: 9 } with {
                         perform Timer.sleep(50)
                         self.answer = "speculative"
                         self.step_index = self.step_index + 4
-                        let m: Maybe[Int] = None in
-                        match m { | Some(x) => x }
+                        perform Fail.now()
                     }
                 }
             }
-            type Maybe[V] = Some(V) | None
             let w = spawn TimerResumeFails {} in { w }
         "#;
         let backing = SharedMemoryStore::new();
@@ -8900,8 +8931,15 @@ match { a: 2, b: 9 } with {
         let actor_id = value.as_actor_id().expect("spawn should return actor ref");
         rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
         rt.borrow_mut().step_actor(actor_id);
-        assert!(rt.borrow().actors.get(&actor_id).unwrap().suspended_execution.is_some());
-        rt.borrow_mut().advance_time(std::time::Duration::from_millis(100));
+        assert!(rt
+            .borrow()
+            .actors
+            .get(&actor_id)
+            .unwrap()
+            .suspended_execution
+            .is_some());
+        rt.borrow_mut()
+            .advance_time(std::time::Duration::from_millis(100));
         rt.borrow_mut().tick_timers();
 
         assert!(
@@ -8909,18 +8947,28 @@ match { a: 2, b: 9 } with {
             "timer resumed failure must quarantine after terminal append rejection"
         );
         assert!(
-            !backing.read_workflow_events(actor_id).iter().any(|event| {
-                matches!(event, WorkflowEvent::StepFailed { .. })
-            }),
+            !backing
+                .read_workflow_events(actor_id)
+                .iter()
+                .any(|event| { matches!(event, WorkflowEvent::StepFailed { .. }) }),
             "rejected StepFailed must not appear in committed history"
         );
         assert_eq!(
-            backing.load_snapshot(actor_id).unwrap().state.get("step_index"),
+            backing
+                .load_snapshot(actor_id)
+                .unwrap()
+                .state
+                .get("step_index"),
             Some(&crate::runtime::PersistedValue::Int(0)),
             "terminal failure must preserve last safe step"
         );
         assert!(
-            backing.load_snapshot(actor_id).unwrap().state.get("answer").is_none(),
+            backing
+                .load_snapshot(actor_id)
+                .unwrap()
+                .state
+                .get("answer")
+                .is_none(),
             "speculative resumed mutation must not be checkpointed"
         );
     }
@@ -8937,12 +8985,10 @@ match { a: 2, b: 9 } with {
                             | fail_step() => 1
                         } after 50 => 4242
                         self.step_index = self.step_index + 4
-                        let m: Maybe[Int] = None in
-                        match m { | Some(x) => x }
+                        perform Fail.now()
                     }
                 }
             }
-            type Maybe[V] = Some(V) | None
             let w = spawn ReceiveResumeFails {} in { w }
         "#;
         let backing = SharedMemoryStore::new();
@@ -8960,8 +9006,15 @@ match { a: 2, b: 9 } with {
         let actor_id = value.as_actor_id().expect("spawn should return actor ref");
         rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
         rt.borrow_mut().step_actor(actor_id);
-        assert!(rt.borrow().actors.get(&actor_id).unwrap().suspended_execution.is_some());
-        rt.borrow_mut().advance_time(std::time::Duration::from_millis(100));
+        assert!(rt
+            .borrow()
+            .actors
+            .get(&actor_id)
+            .unwrap()
+            .suspended_execution
+            .is_some());
+        rt.borrow_mut()
+            .advance_time(std::time::Duration::from_millis(100));
         rt.borrow_mut().tick_timers();
 
         assert!(
@@ -8969,18 +9022,28 @@ match { a: 2, b: 9 } with {
             "receive resumed failure must quarantine after terminal append rejection"
         );
         assert!(
-            !backing.read_workflow_events(actor_id).iter().any(|event| {
-                matches!(event, WorkflowEvent::StepFailed { .. })
-            }),
+            !backing
+                .read_workflow_events(actor_id)
+                .iter()
+                .any(|event| { matches!(event, WorkflowEvent::StepFailed { .. }) }),
             "rejected StepFailed must not appear in committed history"
         );
         assert_eq!(
-            backing.load_snapshot(actor_id).unwrap().state.get("step_index"),
+            backing
+                .load_snapshot(actor_id)
+                .unwrap()
+                .state
+                .get("step_index"),
             Some(&crate::runtime::PersistedValue::Int(0)),
             "terminal failure must preserve last safe step"
         );
         assert!(
-            backing.load_snapshot(actor_id).unwrap().state.get("answer").is_none(),
+            backing
+                .load_snapshot(actor_id)
+                .unwrap()
+                .state
+                .get("answer")
+                .is_none(),
             "speculative resumed mutation must not be checkpointed"
         );
     }
@@ -8996,19 +9059,18 @@ match { a: 2, b: 9 } with {
                     {
                         self.answer = perform Inference.ask("hello")
                         self.step_index = self.step_index + 4
-                        let m: Maybe[Int] = None in
-                        match m { | Some(x) => x }
+                        perform Fail.now()
                     }
                 }
             }
-            type Maybe[V] = Some(V) | None
             let w = spawn LlmResumeFails {} in { w }
         "#;
         let backing = SharedMemoryStore::new();
         let (module, _ty) = compile_source(source).unwrap();
         let rt = Rc::new(RefCell::new(Runtime::new()));
         rt.borrow_mut().persistence = Box::new(RejectStepFailedStore(backing.clone()));
-        rt.borrow_mut().set_llm_client(Box::new(nulang_ai::MockLlmClient::text("world")));
+        rt.borrow_mut()
+            .set_llm_client(Box::new(nulang_ai::MockLlmClient::text("world")));
 
         let value = {
             let mut vm = VM::new();
@@ -9025,18 +9087,28 @@ match { a: 2, b: 9 } with {
             "llm resumed failure must quarantine after terminal append rejection"
         );
         assert!(
-            !backing.read_workflow_events(actor_id).iter().any(|event| {
-                matches!(event, WorkflowEvent::StepFailed { .. })
-            }),
+            !backing
+                .read_workflow_events(actor_id)
+                .iter()
+                .any(|event| { matches!(event, WorkflowEvent::StepFailed { .. }) }),
             "rejected StepFailed must not appear in committed history"
         );
         assert_eq!(
-            backing.load_snapshot(actor_id).unwrap().state.get("step_index"),
+            backing
+                .load_snapshot(actor_id)
+                .unwrap()
+                .state
+                .get("step_index"),
             Some(&crate::runtime::PersistedValue::Int(0)),
             "terminal failure must preserve last safe step"
         );
         assert!(
-            backing.load_snapshot(actor_id).unwrap().state.get("answer").is_none(),
+            backing
+                .load_snapshot(actor_id)
+                .unwrap()
+                .state
+                .get("answer")
+                .is_none(),
             "speculative resumed mutation must not be checkpointed"
         );
     }
