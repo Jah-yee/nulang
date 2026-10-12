@@ -176,7 +176,9 @@ mod tests {
 
     impl PersistenceStore for RejectStepFailedCheckpointStore {
         fn save_snapshot(&mut self, _snapshot: ActorSnapshot) -> std::io::Result<()> {
-            Err(std::io::Error::other("injected failed-step checkpoint rejection"))
+            Err(std::io::Error::other(
+                "injected failed-step checkpoint rejection",
+            ))
         }
         fn load_snapshot(&self, actor_id: u64) -> Option<ActorSnapshot> {
             self.0.load_snapshot(actor_id)
@@ -8591,12 +8593,10 @@ match { a: 2, b: 9 } with {
                 step fail_step {
                     {
                         self.answer = "uncommitted"
-                        let m: Maybe[Int] = None in
-                        match m { | Some(x) => x }
+                        perform Fail.now()
                     }
                 }
             }
-            type Maybe[V] = Some(V) | None
             let w = spawn FailureRejectTerminal {} in { w }
         "#;
         let backing = SharedMemoryStore::new();
@@ -8619,7 +8619,9 @@ match { a: 2, b: 9 } with {
             }),
             "compensatable prepare step must commit before injecting failed-step fault"
         );
-        let safe = backing.load_snapshot(actor_id).expect("completed prepare checkpoint");
+        let safe = backing
+            .load_snapshot(actor_id)
+            .expect("completed prepare checkpoint");
 
         rt.borrow_mut().send_message_by_id(actor_id, 1, &[]);
         rt.borrow_mut().run_scheduler();
@@ -8629,18 +8631,22 @@ match { a: 2, b: 9 } with {
             "rejected StepFailed must quarantine the speculative failed activation"
         );
         assert!(
-            !backing.read_workflow_events(actor_id).iter().any(|event| {
-                matches!(event, WorkflowEvent::StepFailed { .. })
-            }),
+            !backing
+                .read_workflow_events(actor_id)
+                .iter()
+                .any(|event| { matches!(event, WorkflowEvent::StepFailed { .. }) }),
             "rejected failure event must not appear in persisted history"
         );
         assert!(
-            !backing.read_workflow_events(actor_id).iter().any(|event| {
-                matches!(event, WorkflowEvent::SagaCompensated { .. })
-            }),
+            !backing
+                .read_workflow_events(actor_id)
+                .iter()
+                .any(|event| { matches!(event, WorkflowEvent::SagaCompensated { .. }) }),
             "compensation must not run when failed-step terminal persistence is rejected"
         );
-        let recovered = backing.load_snapshot(actor_id).expect("safe snapshot remains");
+        let recovered = backing
+            .load_snapshot(actor_id)
+            .expect("safe snapshot remains");
         assert_eq!(
             recovered.sequence, safe.sequence,
             "failed step must not checkpoint before its terminal event commits"
@@ -8667,12 +8673,10 @@ match { a: 2, b: 9 } with {
                 step fail_step {
                     {
                         self.answer = "uncommitted"
-                        let m: Maybe[Int] = None in
-                        match m { | Some(x) => x }
+                        perform Fail.now()
                     }
                 }
             }
-            type Maybe[V] = Some(V) | None
             let w = spawn FailureCheckpointRejected {} in { w }
         "#;
         let backing = SharedMemoryStore::new();
@@ -8695,7 +8699,9 @@ match { a: 2, b: 9 } with {
             }),
             "compensatable prepare step must commit before injecting failed-step fault"
         );
-        let safe = backing.load_snapshot(actor_id).expect("completed prepare checkpoint");
+        let safe = backing
+            .load_snapshot(actor_id)
+            .expect("completed prepare checkpoint");
         rt.borrow_mut().persistence = Box::new(RejectStepFailedCheckpointStore(backing.clone()));
 
         rt.borrow_mut().send_message_by_id(actor_id, 1, &[]);
@@ -8706,18 +8712,22 @@ match { a: 2, b: 9 } with {
             "a failed terminal checkpoint must quarantine the live workflow"
         );
         assert!(
-            backing.read_workflow_events(actor_id).iter().any(|event| {
-                matches!(event, WorkflowEvent::StepFailed { .. })
-            }),
+            backing
+                .read_workflow_events(actor_id)
+                .iter()
+                .any(|event| { matches!(event, WorkflowEvent::StepFailed { .. }) }),
             "the injected checkpoint failure must occur after StepFailed append"
         );
         assert!(
-            !backing.read_workflow_events(actor_id).iter().any(|event| {
-                matches!(event, WorkflowEvent::SagaCompensated { .. })
-            }),
+            !backing
+                .read_workflow_events(actor_id)
+                .iter()
+                .any(|event| { matches!(event, WorkflowEvent::SagaCompensated { .. }) }),
             "compensation must not run when failed-step terminal persistence is rejected"
         );
-        let recovered = backing.load_snapshot(actor_id).expect("safe snapshot remains");
+        let recovered = backing
+            .load_snapshot(actor_id)
+            .expect("safe snapshot remains");
         assert_eq!(
             recovered.sequence, safe.sequence,
             "failure checkpoint must not publish speculative state"
