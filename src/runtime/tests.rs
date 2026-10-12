@@ -3686,6 +3686,53 @@ fn foreign_hold_dedup_preserves_distinct_receivers_and_retired_heap() {
     );
 }
 
+/// An exited owner's retired heap must remain alive for queued repeated
+/// deliveries, but the receiver should establish only one persistent hold
+/// when it eventually consumes them.
+#[test]
+fn repeated_foreign_deliveries_preserve_retired_owner_heap() {
+    let mut rt = Runtime::new();
+    let owner = rt.spawn_actor(Box::new(|| vec![]));
+    let receiver = rt.spawn_actor(Box::new(|| vec![]));
+    declare_test_behavior(&mut rt, receiver, "handle");
+    rt.run_scheduler();
+
+    let ptr = rt
+        .actors
+        .get_mut(&owner)
+        .unwrap()
+        .heap
+        .alloc(16, TypeTag::Raw)
+        .unwrap();
+    // SAFETY: live allocation remains pinned by in-flight message refs.
+    let value = unsafe { Value::ptr(ptr) };
+    rt.current_actor = Some(owner);
+    for _ in 0..32 {
+        rt.send_message_by_id(receiver, 0, &[value]);
+    }
+    rt.current_actor = None;
+
+    rt.exit_actor(owner, ExitReason::Normal);
+    assert_eq!(
+        rt.retired_heaps.len(),
+        1,
+        "queued references must pin the exited owner's heap"
+    );
+
+    rt.run_scheduler();
+    assert_eq!(
+        unsafe { (*ActorHeap::header_of(ptr)).foreign_count },
+        1,
+        "only the receiver's single hold should remain after all sends drain"
+    );
+
+    rt.exit_actor(receiver, ExitReason::Normal);
+    assert!(
+        rt.retired_heaps.is_empty(),
+        "retired heap must be reclaimed after final receiver hold is released"
+    );
+}
+
 /// Regression test: forwarding a received heap reference must use the
 /// true owner recorded in the object header, not the forwarding actor —
 /// the old code tripped the `send_ref_to` ownership debug_assert and, in
