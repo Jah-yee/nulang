@@ -1739,10 +1739,10 @@ fn cmd_test(filter: Option<&str>, verbose: bool, json: bool) -> NuResult<()> {
 
     let mut tests: Vec<TestCase> = Vec::new();
     for file in &test_files {
-        let content = match std::fs::read_to_string(file) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
+        let content = std::fs::read_to_string(file).map_err(|e| NuError::PackageError {
+            msg: format!("cannot read test file {}: {}", file.display(), e),
+            span: Span::default(),
+        })?;
         let test_fns = discover_test_functions(&content);
         let relative = file
             .strip_prefix(&tests_dir.parent().unwrap_or(&tests_dir))
