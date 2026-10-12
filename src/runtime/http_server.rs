@@ -988,7 +988,7 @@ impl WebDevServer {
                                                         .into_bytes(),
                                                 }
                                             }
-                                        },
+                                        }
                                         Ok(None) => HttpResponse {
                                             status: 500,
                                             headers: vec![(
@@ -1248,7 +1248,9 @@ mod tests {
             },
             params: HashMap::new(),
         };
-        let legacy = r#"<html><head><meta http-equiv="refresh" content="0;url=/receipt"></head></html>"#.to_string();
+        let legacy =
+            r#"<html><head><meta http-equiv="refresh" content="0;url=/receipt"></head></html>"#
+                .to_string();
 
         assert_eq!(take_web_redirect(&legacy), None);
         with_request_context(request.clone(), || {
@@ -1270,14 +1272,12 @@ mod tests {
         let response = web_redirect_http_response("/receipt?ok=yes".to_string());
         assert_eq!(response.status, 303);
         assert!(response.body.is_empty());
-        assert!(response.headers.contains(&(
-            "Location".to_string(),
-            "/receipt?ok=yes".to_string()
-        )));
-        assert!(response.headers.contains(&(
-            "Cache-Control".to_string(),
-            "no-store".to_string()
-        )));
+        assert!(response
+            .headers
+            .contains(&("Location".to_string(), "/receipt?ok=yes".to_string())));
+        assert!(response
+            .headers
+            .contains(&("Cache-Control".to_string(), "no-store".to_string())));
     }
 
     #[test]
