@@ -3,7 +3,6 @@ title: Nulang vs Erlang, Elixir, Go, Rust, Akka, Orleans, and Ray
 description: Compare Nulang with Erlang, Elixir, Go, Rust, Akka Typed, Microsoft Orleans, and Ray for actors, durability, distributed systems, and AI agents.
 ---
 
-# Compare Nulang with actor languages and frameworks
 
 Choosing a language for **durable distributed applications** is different from choosing one for ordinary HTTP services. The key questions are what happens when a worker crashes, how state is restored, where messages are delivered, and which guarantees survive a network partition.
 
