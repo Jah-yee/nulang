@@ -1228,6 +1228,25 @@ mod tests {
     }
 
     #[test]
+    fn test_formatter_refuses_to_erase_comments() {
+        for source in [
+            "fn f() { 1 } // trailing comment\n",
+            "/// API documentation\nfn f() { 1 }\n",
+            "fn f() { /* nested comment */ 1 }\n",
+            "#!/usr/bin/env nulang\nfn main() { 1 }\n",
+        ] {
+            let result = format_source(source);
+            assert!(result.is_err(), "should preserve comment/shebang source");
+        }
+    }
+
+    #[test]
+    fn test_formatter_does_not_confuse_urls_with_comments() {
+        let source = "fn url() -> String { \"https://example.org/path\" }";
+        assert!(format_source(source).is_ok(), "URL text is not a comment");
+    }
+
+    #[test]
     fn test_fmt_effect_decl() {
         let src = r#"effect MyEffect {
     op: Int -> Bool

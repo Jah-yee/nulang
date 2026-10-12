@@ -1782,6 +1782,16 @@ mod tests {
     }
 
     #[test]
+    fn test_lex_with_comments_preserves_comment_tokens() {
+        let source = "fn f() { 1 } // note\n/// documented\n";
+        let all = Lexer::new(source).lex_with_comments().unwrap();
+        assert!(all.iter().any(|t| matches!(&t.kind, TokenKind::Comment(_))));
+        assert!(all.iter().any(|t| matches!(&t.kind, TokenKind::DocComment(_))));
+        let normal = Lexer::new(source).lex().unwrap();
+        assert!(!normal.iter().any(|t| matches!(&t.kind, TokenKind::Comment(_))));
+    }
+
+    #[test]
     fn test_unicode_escape_surrogate_errors() {
         let mut lexer = Lexer::new("\"\\u{D800}\"");
         let err = lexer.lex().unwrap_err();
