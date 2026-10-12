@@ -2369,12 +2369,12 @@ impl Runtime {
         &mut self,
         target_id: u64,
         behavior_id: u16,
-        args: &[Value],
+        payload: MessagePayload,
         out_trace: Option<String>,
         grain_id: Option<GrainId>,
     ) -> MessageAdmission {
         let target_shard = (target_id % self.shard_count as u64) as u16;
-        for arg in args {
+        for arg in payload.as_slice() {
             if arg.is_ptr() || arg.is_actor_ref() || arg.is_closure() {
                 tracing::warn!(
                     "nulang-shard: dropping cross-shard message to actor {}: \
@@ -2384,7 +2384,7 @@ impl Runtime {
                 return MessageAdmission::Rejected;
             }
         }
-        let Some(object_holds) = ObjectRefLease::acquire(&self.object_store, args) else {
+        let Some(object_holds) = ObjectRefLease::acquire(&self.object_store, payload.as_slice()) else {
             warn!(
                 "nulang-shard: rejecting cross-shard message to actor {}: object ref not found",
                 target_id
@@ -2395,7 +2395,7 @@ impl Runtime {
         let result = tx[target_shard as usize].try_send(CrossShardMsg::DeliverMessage {
             target_id,
             behavior_id,
-            payload: MessagePayload::from_slice(args),
+            payload,
             sender: self.current_actor.unwrap_or(0),
             trace_id: out_trace,
             grain_id,
@@ -2500,7 +2500,7 @@ impl Runtime {
                 return self.send_cross_shard_message(
                     target_id,
                     behavior_id,
-                    args,
+                    MessagePayload::from_slice(args),
                     out_trace,
                     None,
                 );
@@ -2546,7 +2546,7 @@ impl Runtime {
                 self.send_cross_shard_message(
                     stable_id,
                     behavior_id,
-                    &args,
+                    MessagePayload::from_vec(args),
                     out_trace,
                     Some(grain_id.clone()),
                 );
@@ -2685,7 +2685,7 @@ impl Runtime {
                 self.send_cross_shard_message(
                     target_id,
                     behavior_id,
-                    args,
+                    MessagePayload::from_slice(args),
                     out_trace.clone(),
                     None,
                 );
