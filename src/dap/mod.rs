@@ -1433,7 +1433,9 @@ pub(crate) mod tests {
                 finished: false,
             };
             let mut buf = [0u8; 1];
-            read_tx.send(std::io::Read::read(&mut reader, &mut buf)).unwrap();
+            read_tx
+                .send(std::io::Read::read(&mut reader, &mut buf))
+                .unwrap();
         });
 
         // An explicit handshake proves the reader reached the EOF boundary;
@@ -1505,9 +1507,7 @@ pub(crate) mod tests {
         // alone would mask an execution failure in this regression test.
         assert!(
             msgs.iter().any(|m| {
-                m["type"] == "event"
-                    && m["event"] == "exited"
-                    && m["body"]["exitCode"] == 0
+                m["type"] == "event" && m["event"] == "exited" && m["body"]["exitCode"] == 0
             }),
             "expected successful exit code 0, got {:#?}",
             msgs
