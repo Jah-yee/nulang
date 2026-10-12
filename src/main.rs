@@ -2808,6 +2808,34 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_top_level_package_aliases_do_not_shadow_runtime_commands() {
+        for cmd in ["new", "run", "test", "build", "dev", "watch", "add", "remove", "list", "clean", "doc"] {
+            assert!(is_package_alias(cmd), "{cmd} should forward to the package manager");
+        }
+        for cmd in ["fmt", "nula", "init", "agent", "node", "registry", "doctor", "check"] {
+            assert!(!is_package_alias(cmd), "{cmd} must preserve its own dispatch");
+        }
+    }
+
+    #[test]
+    fn test_check_command_maps_to_existing_check_option() {
+        assert_eq!(long_option_alias("check"), Some("--check"));
+        assert_eq!(long_option_alias("--check"), None);
+        assert_eq!(long_option_alias("run"), None);
+    }
+
+    #[test]
+    fn test_doctor_reports_environment_without_requirements_to_build_from_source() {
+        let report = doctor_report();
+        assert!(report.contains("Nulang doctor"));
+        assert!(report.contains("language version:"));
+        assert!(report.contains("target:"));
+        assert!(report.contains("binary:"));
+        assert!(report.contains("stdlib:"));
+        assert!(report.contains("package:"));
+    }
+
     /// An actor program run through the CLI path must create real actors
     /// and deliver sent messages: with the bare standalone VM the stub
     /// spawn/send callbacks would leave the counter at 0.
