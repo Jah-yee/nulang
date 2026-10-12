@@ -99,8 +99,9 @@ pub struct JsonSpan {
     pub end_col: usize,
 }
 
-/// A suggested fix. `message` mirrors the existing human-facing help text;
-/// `replacement` stays null unless a machine-applicable edit exists.
+/// A suggested fix. `replacement` is non-null only for a single compiler-
+/// verified name correction whose diagnostic span exactly matches the source
+/// identifier. All other suggestions remain human-readable only.
 #[derive(Debug, Clone, Serialize)]
 pub struct JsonSuggestion {
     pub message: String,
