@@ -5085,7 +5085,7 @@ impl Runtime {
                     if (*self_ptr).actor_is_workflow(actor_id) {
                         failed_workflow_step = Some(error.to_string());
                     }
-                },
+                }
             }
             // End the VM-execution window only after any suspend-state
             // re-capture above: draining deferred wakes runs other actors
