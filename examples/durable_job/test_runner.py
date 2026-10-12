@@ -35,7 +35,7 @@ class CrashHarnessTests(unittest.TestCase):
     def test_prepare_crash_reports_child_exit_and_stderr(self):
         with tempfile.TemporaryDirectory() as temp:
             child = Path(temp) / "bad-child.py"
-            child.write_text("import sys\\nprint('actual runtime failure', file=sys.stderr)\\nsys.exit(5)\\n")
+            child.write_text("import sys\nprint('actual runtime failure', file=sys.stderr)\nsys.exit(5)\n")
             with self.assertRaisesRegex(RuntimeError, "actual runtime failure"):
                 run_demo.run_phase([sys.executable, str(child)], Path(temp),
                                    "prepare", ["PREPARED=1:0"], 5)
