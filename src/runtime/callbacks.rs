@@ -268,6 +268,73 @@ fn authorize_actor_host_effect(
         .map_err(|error| error.to_string())
 }
 
+/// Execute only these explicitly supported CLI builtins after the actor-host
+/// authority check in `perform_builtin_effect_in_module`. Do not invoke this
+/// function from the unguarded `perform_builtin_effect` callback: actor-backed
+/// host operations must not bypass exact actor authority grants.
+fn perform_authorized_cli_builtin(
+    callbacks: &mut dyn crate::vm::ActorVmCallbacks,
+    effect_name: &str,
+    op_name: Option<&str>,
+    constants: &[crate::bytecode::Constant],
+    regs: &[crate::vm::Value],
+) -> Option<crate::vm::Value> {
+    use crate::vm::Value;
+
+    fn allocate_string(
+        callbacks: &mut dyn crate::vm::ActorVmCallbacks,
+        text: &str,
+    ) -> Value {
+        let Some(ptr) = callbacks.alloc(
+            text.len() + 1,
+            crate::runtime::heap::TypeTag::String,
+        ) else {
+            return Value::nil();
+        };
+        // SAFETY: callback allocation owns at least text.len() + 1 bytes.
+        // The Nulang heap string representation is NUL-terminated.
+        unsafe {
+            std::ptr::copy_nonoverlapping(text.as_ptr(), ptr, text.len());
+            *ptr.add(text.len()) = 0;
+            Value::ptr(ptr)
+        }
+    }
+
+    match (effect_name, op_name) {
+        ("Env", Some("get")) => {
+            let name = regs
+                .first()
+                .map(|value| crate::vm::resolve_value_string(constants, *value))
+                .unwrap_or_default();
+            Some(match std::env::var(&name) {
+                Ok(value) => allocate_string(callbacks, &value),
+                Err(_) => Value::nil(),
+            })
+        }
+        ("System", Some("arg")) => {
+            let index = regs.first().and_then(|value| value.as_int()).unwrap_or(-1);
+            if index < 0 {
+                return Some(Value::nil());
+            }
+            Some(match std::env::args().nth(index as usize) {
+                Some(value) => allocate_string(callbacks, &value),
+                None => Value::nil(),
+            })
+        }
+        ("FS", Some("read")) => {
+            let path = regs
+                .first()
+                .map(|value| crate::vm::resolve_value_string(constants, *value))
+                .unwrap_or_default();
+            Some(match std::fs::read_to_string(path) {
+                Ok(content) => allocate_string(callbacks, &content),
+                Err(_) => Value::nil(),
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Enforce an exact actor-backed foreign-function authority grant.
 ///
 /// The grant argument includes both library and symbol so permission to call
@@ -1108,6 +1175,15 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
                 Err(_) => Some(crate::vm::Value::nil()),
             };
         }
+        if let Some(value) = perform_authorized_cli_builtin(
+            self,
+            effect_name,
+            op_name,
+            &module.constants,
+            regs,
+        ) {
+            return Some(value);
+        }
         self.perform_builtin_effect(effect_name, op_name, &module.constants, regs)
     }
 
@@ -1922,6 +1998,15 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                     }
                     Err(_) => Some(crate::vm::Value::nil()),
                 };
+            }
+            if let Some(value) = perform_authorized_cli_builtin(
+                self,
+                effect_name,
+                op_name,
+                &module.constants,
+                regs,
+            ) {
+                return Some(value);
             }
             self.perform_builtin_effect(effect_name, op_name, &module.constants, regs)
         }
