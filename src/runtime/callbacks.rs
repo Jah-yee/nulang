@@ -2602,6 +2602,19 @@ mod remote_spawn_failure_contract_tests {
     use crate::vm::DistributedVmCallbacks;
 
     #[test]
+    fn zero_actor_address_is_not_an_admitted_spawn() {
+        let value = super::actor_ref_for_spawn_address(
+            super::ActorAddress::local(0),
+        );
+        assert!(value.is_nil(), "reserved actor id zero must never be a spawn success");
+
+        let valid = super::actor_ref_for_spawn_address(
+            super::ActorAddress::remote(super::NodeId(42), 73),
+        );
+        assert_eq!(valid.as_actor_id(), Some(73));
+    }
+
+    #[test]
     fn unavailable_distributed_runtime_cannot_fabricate_actor_identity() {
         let mut runtime = Runtime::new();
         let mut callbacks = BytecodeDistributedCallbacks {
