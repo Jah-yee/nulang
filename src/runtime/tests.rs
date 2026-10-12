@@ -7836,6 +7836,98 @@ fn test_object_ref_released_on_actor_exit() {
 }
 
 #[test]
+fn test_cross_shard_numeric_send_preserves_inline_payload_and_fifo_delivery() {
+    let mut shards = Runtime::new_sharded(2);
+    let mut target = shards[1].spawn_actor(Box::new(|| vec![]));
+    while target % 2 != 1 {
+        target = shards[1].spawn_actor(Box::new(|| vec![]));
+    }
+
+    // Cover both sides of the 4-Value inline boundary, including empty sends.
+    for len in [0usize, 1, 4, 5] {
+        let values: Vec<Value> = (0..len).map(|i| Value::int(i as i64)).collect();
+        shards[0].send_message_by_id(target, 0, &values);
+        let packet = shards[1]
+            .cross_shard_rx
+            .as_ref()
+            .expect("target shard has a channel")
+            .try_recv()
+            .expect("cross-shard message admitted");
+
+        match packet {
+            CrossShardMsg::DeliverMessage {
+                target_id,
+                behavior_id,
+                payload,
+                sender,
+                trace_id,
+                grain_id,
+                object_holds,
+            } => {
+                assert_eq!(target_id, target);
+                assert_eq!(payload.as_slice(), values.as_slice());
+                assert_eq!(payload.is_inline(), len <= 4);
+                shards[1].deliver_cross_shard_message(
+                    target_id,
+                    behavior_id,
+                    payload,
+                    sender,
+                    trace_id,
+                    grain_id,
+                    object_holds,
+                );
+            }
+            other => panic!("expected numeric cross-shard delivery: {other:?}"),
+        }
+        let received = shards[1]
+            .actors
+            .get_mut(&target)
+            .unwrap()
+            .mailbox
+            .pop()
+            .expect("target mailbox must receive the payload");
+        assert_eq!(received.payload.as_slice(), values.as_slice());
+        assert_eq!(received.payload.is_inline(), len <= 4);
+    }
+}
+
+#[test]
+fn test_cross_shard_named_send_preserves_inline_payload() {
+    let mut shards = Runtime::new_sharded(2);
+    let mut target = shards[1].spawn_actor(Box::new(|| vec![]));
+    while target % 2 != 1 {
+        target = shards[1].spawn_actor(Box::new(|| vec![]));
+    }
+    declare_test_behavior(&mut shards[1], target, "handle");
+
+    for len in [1usize, 4, 5] {
+        let values: Vec<Value> = (0..len).map(|i| Value::int(i as i64)).collect();
+        shards[0].send_message(target, "handle", &values);
+        let packet = shards[1]
+            .cross_shard_rx
+            .as_ref()
+            .unwrap()
+            .try_recv()
+            .expect("named message admitted");
+        match packet {
+            CrossShardMsg::DeliverNamedMessage { payload, .. } => {
+                assert_eq!(payload.as_slice(), values.as_slice());
+                assert_eq!(payload.is_inline(), len <= 4);
+            }
+            other => panic!("expected named cross-shard delivery: {other:?}"),
+        }
+
+        // Send again to exercise the real owner-shard resolution and mailbox
+        // admission path, not just the in-flight representation.
+        shards[0].send_message(target, "handle", &values);
+        shards[1].drain_cross_shard_messages();
+        let received = shards[1].actors.get_mut(&target).unwrap().mailbox.pop().unwrap();
+        assert_eq!(received.payload.as_slice(), values.as_slice());
+        assert_eq!(received.payload.is_inline(), len <= 4);
+    }
+}
+
+#[test]
 fn test_object_ref_cross_shard_reuses_node_shared_storage() {
     let mut shards = Runtime::new_sharded(2);
 
