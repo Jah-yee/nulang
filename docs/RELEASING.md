@@ -44,12 +44,21 @@ creates a GitHub Release with:
 - Smoke-test one artifact:
 
   ```bash
-  curl -LO https://github.com/nulang-org/nulang/releases/download/v0.2.0/nulang-linux-x86_64.tar.gz
+  base=https://github.com/nulang-org/nulang/releases/download/v0.2.0
+  curl -fLO "$base/nulang-linux-x86_64.tar.gz"
+  curl -fLO "$base/nulang-linux-x86_64.tar.gz.sha256"
   sha256sum -c nulang-linux-x86_64.tar.gz.sha256
   tar xzf nulang-linux-x86_64.tar.gz
-  ./nulang --version   # must print the version you just tagged
-  ./nulang --eval 'perform IO.print("release works")'
+  ./nulang-linux-x86_64 --version   # must print the version you just tagged
+  ./nulang-linux-x86_64 --eval 'perform IO.print("release works")'
   ```
 
-- If anything is wrong, delete the release and tag (`git push origin :v0.2.0`
-  plus the GitHub release page), fix, and re-tag.
+- Verify the executable extracted from each archive, not just a source-built
+  binary. On Linux, inspect dynamic dependencies with
+  `ldd ./nulang-linux-x86_64` and repeat the smoke test on a clean supported
+  environment. CI builds on a runner with development libraries installed;
+  that does not establish portability to another Linux distribution.
+- If a release artifact is broken, stop recommending it, document the affected
+  version, fix the cause, and publish a new version and tag. Do not silently
+  replace binaries under an already-public tag; consumers may have pinned the
+  old checksums.
