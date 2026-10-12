@@ -28,6 +28,8 @@ fn main() {
     perform IO.print("surrogate=" + status(utf8_rune_count([237, 160, 128])))
     perform IO.print("too_large=" + status(utf8_rune_count([244, 144, 128, 128])))
     perform IO.print("stray=" + status(utf8_rune_count([128])))
+    perform IO.print("too_high_lead=" + status(utf8_rune_count([245, 128, 128, 128])))
+    perform IO.print("offset=" + status(utf8_rune_count([65, 226, 40, 161])))
     perform IO.print("invalid_second=" + status(utf8_rune_count([65, 226, 300, 128])))
     perform IO.print("negative=" + status(utf8_rune_count([-1])))
     perform IO.print("large=" + status(utf8_rune_count([256])))
