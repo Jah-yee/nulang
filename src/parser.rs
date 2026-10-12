@@ -5547,8 +5547,22 @@ impl Parser {
             TokenKind::LBrace => {
                 self.advance(); // consume '{'
                 let mut fields = Vec::new();
+                let mut open_row = false;
                 self.skip_newlines();
                 while self.peek_kind() != &TokenKind::RBrace && !self.is_at_end() {
+                    // Experimental inline open-row annotation: { x: Int, .. }.
+                    if self.consume_if(&TokenKind::DotDot) {
+                        open_row = true;
+                        self.skip_newlines();
+                        if self.peek_kind() != &TokenKind::RBrace {
+                            return Err(NuError::parse_error(
+                                "open row tail must appear at the end of the record type"
+                                    .to_string(),
+                                self.current_span(),
+                            ));
+                        }
+                        break;
+                    }
                     let fname = self.expect_ident("field name")?;
                     self.expect(TokenKind::Colon)?;
                     let fty = self.parse_type()?;
@@ -5560,7 +5574,11 @@ impl Parser {
                     self.skip_newlines();
                 }
                 self.expect(TokenKind::RBrace)?;
-                Ok(Type::Record(fields))
+                if open_row {
+                    Ok(Type::record_open(fields, TypeVar::fresh()))
+                } else {
+                    Ok(Type::Record(fields))
+                }
             }
             TokenKind::Ampersand => {
                 self.advance(); // consume '&'
