@@ -42,7 +42,7 @@
 //! valid and that no data races occur when multiple actors access the same object.
 
 use crate::runtime::heap::{OrcaHeader, TypeTag};
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 
 // ---------------------------------------------------------------------------
 // OrcaHeap trait
@@ -204,7 +204,7 @@ pub struct OrcaGc {
     /// Each distinct hold keeps the object's `foreign_count` elevated by one, so
     /// the object (and, if the owner has exited, its retired heap) stays
     /// alive until the runtime releases the hold when this actor exits.
-    held_foreign_refs: HashSet<(u64, *mut OrcaHeader)>,
+    held_foreign_refs: FxHashSet<(u64, *mut OrcaHeader)>,
     /// Per-actor statistics.
     stats: GcStats,
 }
@@ -218,7 +218,7 @@ impl OrcaGc {
             actor_id,
             deferred_decrements: Vec::new(),
             foreign_ref_queue: Vec::new(),
-            held_foreign_refs: HashSet::new(),
+            held_foreign_refs: FxHashSet::default(),
             stats: GcStats::default(),
         }
     }
