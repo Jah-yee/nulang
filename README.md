@@ -9,6 +9,9 @@
   <a href="https://nulang.org">Website</a> •
   <a href="https://nulang.org/playground/">Playground</a> •
   <a href="https://nulang.cloud">Nulang Cloud</a> •
+  <a href="https://github.com/nulang-org/nulang/issues">Issues</a> •
+  <a href="ROADMAP.md">Roadmap</a> •
+  <a href="CONTRIBUTING.md">Contribute</a> •
   <a href="https://github.com/nulang-org/nulang">GitHub</a>
 </p>
 <p align="center">
@@ -121,6 +124,20 @@ perform IO.print("Hello, " + name + "!")
 
 ---
 
+## Contribute to Nulang
+
+Nulang welcomes focused fixes, tests, runnable examples, documentation, and
+tooling improvements. Start with the [contributor guide](CONTRIBUTING.md), see
+the [roadmap](ROADMAP.md) for priorities, browse
+[open issues](https://github.com/nulang-org/nulang/issues), or
+[ask in Discussions](https://github.com/nulang-org/nulang/discussions)
+before taking on a broad design change. The
+[issue forms](https://github.com/nulang-org/nulang/issues/new/choose) help
+maintainers reproduce and triage proposals; no Rust expertise is required for
+documentation and example contributions.
+
+---
+
 ## Feature Highlights
 
 - **Algebraic effects** — `perform Effect.op(args)` / `handle body with { | Effect.op(x) => ... }` with resume semantics. Effect dependencies are explicit in function signatures via `!` rows.
@@ -149,6 +166,8 @@ perform IO.print("Hello, " + name + "!")
 
 | Document | Description |
 |----------|-------------|
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Contributor setup, issue selection, tests, PR expectations, and stability/RFC policy |
+| [`ROADMAP.md`](ROADMAP.md) | Current contributor priorities and live issue trackers |
 | [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) | Installation, values, effects, actors, pattern matching — with runnable code snippets |
 | [`docs/ADOPTION_PILOT.md`](docs/ADOPTION_PILOT.md) | Independent-developer pilot protocol and measurable adoption gate (#809) |
 | [`docs/TUTORIAL.md`](docs/TUTORIAL.md) | **Tutorial:** Build a Weather CLI step by step — variables, functions, HTTP, JSON, pattern matching, records, file I/O |
