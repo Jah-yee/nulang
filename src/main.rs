@@ -3004,6 +3004,27 @@ mod tests {
         assert_eq!(ast, original, "invalid test signature must leave AST intact");
     }
 
+    #[test]
+    fn test_named_entrypoint_runs_original_module_without_invoking_old_main() {
+        let source = r#"
+            fn main() { perform Test.assert_eq(1, 2) }
+            fn test_pass() { perform Test.assert_eq(1, 1) }
+        "#;
+        let result = run_source_selected_test(
+            source,
+            Some("tests/test_ast_entrypoint.nula"),
+            false,
+            "bytecode",
+            None,
+            None,
+            "native",
+            &[],
+            None,
+            false,
+            Some("test_pass"),
+        );
+        assert!(result.is_ok(), "selected test should pass: {result:?}");
+    }
 
     /// An actor program run through the CLI path must create real actors
     /// and deliver sent messages: with the bare standalone VM the stub
