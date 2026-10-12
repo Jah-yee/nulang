@@ -1268,9 +1268,7 @@ mod tests {
         );
         assert!(send(server.port, &foreign).starts_with("HTTP/1.1 403 Forbidden"));
 
-        let missing = format!(
-            "POST /sign HTTP/1.1\r\nHost: {host}\r\nContent-Length: 0\r\n\r\n"
-        );
+        let missing = format!("POST /sign HTTP/1.1\r\nHost: {host}\r\nContent-Length: 0\r\n\r\n");
         assert!(send(server.port, &missing).starts_with("HTTP/1.1 403 Forbidden"));
 
         let trusted = format!(
