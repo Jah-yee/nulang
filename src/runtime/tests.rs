@@ -3623,7 +3623,9 @@ fn repeated_foreign_pointer_deliveries_take_one_receiver_hold() {
     // The receiver's hold protects the object after the sender's last drop.
     let owner_actor = rt.actors.get_mut(&owner).unwrap();
     unsafe {
-        owner_actor.orca_gc.drop_local_ref(&mut owner_actor.heap, ptr);
+        owner_actor
+            .orca_gc
+            .drop_local_ref(&mut owner_actor.heap, ptr);
     }
     assert_eq!(owner_actor.heap.live_count(), 1);
 
