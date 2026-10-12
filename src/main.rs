@@ -1290,7 +1290,9 @@ fn print_help() {
     );
     println!("  new|run|test|build|dev ...  Short aliases for `nulang nula <cmd>`");
     println!("  check <file>     Alias for --check <file>");
-    println!("  doctor           Show binary, compiled features, stdlib and package status");
+    println!(
+        "  doctor           Show binary, compiled features, stdlib and package status"
+    );
     println!("  --version, -V    Print version and exit");
     println!("  init <name>      Scaffold experiment");
     println!("  --watch <file>   Re-run on changes");
@@ -2925,11 +2927,21 @@ mod tests {
 
     #[test]
     fn test_top_level_package_aliases_do_not_shadow_runtime_commands() {
-        for cmd in ["new", "run", "test", "build", "dev", "watch", "add", "remove", "list", "clean", "doc"] {
-            assert!(is_package_alias(cmd), "{cmd} should forward to the package manager");
+        for cmd in [
+            "new", "run", "test", "build", "dev", "watch", "add", "remove", "list", "clean", "doc",
+        ] {
+            assert!(
+                is_package_alias(cmd),
+                "{cmd} should forward to the package manager"
+            );
         }
-        for cmd in ["fmt", "nula", "init", "agent", "node", "registry", "doctor", "check"] {
-            assert!(!is_package_alias(cmd), "{cmd} must preserve its own dispatch");
+        for cmd in [
+            "fmt", "nula", "init", "agent", "node", "registry", "doctor", "check",
+        ] {
+            assert!(
+                !is_package_alias(cmd),
+                "{cmd} must preserve its own dispatch"
+            );
         }
     }
 
