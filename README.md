@@ -140,13 +140,15 @@ nulang --eval 'perform IO.print("Hello, Nulang!")'
 nulang --repl
 ```
 
-**From a source checkout:** after `cargo build --release`, run the actual
-binary using its repository-relative path (no `PATH` changes required):
+**From a source checkout:** Cargo is configured to place build artifacts
+outside the checkout (see [`.cargo/config.toml`](.cargo/config.toml)).
+Use `cargo run` so these commands work regardless of the configured target
+directory:
 
 ```bash
-./target/release/nulang examples/01_hello.nula
-./target/release/nulang --check examples/01_hello.nula
-./target/release/nulang examples/08_actors.nula
+cargo run --locked --release -- examples/01_hello.nula
+cargo run --locked --release -- --check examples/01_hello.nula
+cargo run --locked --release -- examples/08_actors.nula
 ```
 
 For a new project, run `nulang nula new my-app` using the installed CLI.
