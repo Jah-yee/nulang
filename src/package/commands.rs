@@ -2596,6 +2596,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_compiler_args_forward_manifest_capabilities_to_wasm_and_json() {
+        let dir = std::env::temp_dir().join(format!(
+            "nulang_compiler_cap_args_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        scaffold_package(&dir, "cap-args", "default").expect("scaffold should succeed");
+        let mut manifest = Manifest::load(&dir).expect("manifest should load");
+        manifest.package.capabilities = vec!["net".to_string(), "fs".to_string()];
+        manifest.save(&dir).expect("save manifest");
+
+        let _guard = ChangeDir::new(&dir);
+        let wasm = compiler_args_with_manifest_capabilities(&[
+            "--backend", "wasm-aot", "--out", "dist/cap-args.wasm", "src/main.nula",
+        ]);
+        assert_eq!(
+            wasm.iter().map(String::as_str).collect::<Vec<_>>(),
+            vec![
+                "--backend", "wasm-aot", "--out", "dist/cap-args.wasm", "src/main.nula",
+                "--with", "net", "--with", "fs",
+            ]
+        );
+
+        let check = compiler_args_with_manifest_capabilities(&[
+            "--json", "--check", "src/main.nula",
+        ]);
+        assert_eq!(
+            check.iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["--json", "--check", "src/main.nula", "--with", "net", "--with", "fs"]
+        );
+
+        manifest.package.capabilities.clear();
+        manifest.save(&dir).expect("save empty capabilities");
+        assert_eq!(
+            compiler_args_with_manifest_capabilities(&["--json", "--check", "src/main.nula"]),
+            vec!["--json", "--check", "src/main.nula"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_manifest_language_pin() {
         let dir = std::env::temp_dir().join(format!("nulang_lang_pin_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
