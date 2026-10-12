@@ -168,6 +168,50 @@ mod tests {
         }
     }
 
+    /// Real VM failed-step checkpoint injection: terminal event append succeeds
+    /// but the following legacy snapshot commit is rejected. Command admission, suspension journaling, and the
+    /// actor's initial checkpoint still use the real shared memory backend.
+    #[derive(Clone)]
+    struct RejectStepFailedCheckpointStore(SharedMemoryStore);
+
+    impl PersistenceStore for RejectStepFailedCheckpointStore {
+        fn save_snapshot(&mut self, snapshot: ActorSnapshot) -> std::io::Result<()> {
+            let _ = snapshot;
+            Err(std::io::Error::other("injected failed-step checkpoint rejection"))
+        }
+        fn load_snapshot(&self, actor_id: u64) -> Option<ActorSnapshot> {
+            self.0.load_snapshot(actor_id)
+        }
+        fn append_journal(&mut self, actor_id: u64, entry: JournalEntry) -> std::io::Result<()> {
+            self.0.append_journal(actor_id, entry)
+        }
+        fn read_journal(&self, actor_id: u64) -> Vec<JournalEntry> {
+            self.0.read_journal(actor_id)
+        }
+        fn append_workflow_event(
+            &mut self,
+            actor_id: u64,
+            event: WorkflowEvent,
+        ) -> std::io::Result<()> {
+            self.0.append_workflow_event(actor_id, event)
+        }
+        fn read_workflow_events(&self, actor_id: u64) -> Vec<WorkflowEvent> {
+            self.0.read_workflow_events(actor_id)
+        }
+        fn append_event(&mut self, actor_id: u64, entry: EventEntry) -> std::io::Result<()> {
+            self.0.append_event(actor_id, entry)
+        }
+        fn read_events(&self, actor_id: u64) -> Vec<EventEntry> {
+            self.0.read_events(actor_id)
+        }
+        fn latest_sequence(&self, actor_id: u64) -> u64 {
+            self.0.latest_sequence(actor_id)
+        }
+        fn clear(&mut self, actor_id: u64) -> std::io::Result<()> {
+            self.0.clear(actor_id)
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Test helpers
     // -----------------------------------------------------------------------
@@ -8587,6 +8631,68 @@ match { a: 2, b: 9 } with {
             recovered.state.get("answer"),
             safe.state.get("answer"),
             "failed step must not expose speculative field mutation"
+        );
+    }
+
+    /// A committed StepFailed marker without its corresponding checkpoint
+    /// must quarantine the live actor rather than run compensation against
+    /// non-durable speculative state.
+    #[test]
+    fn test_workflow_immediate_failed_step_checkpoint_failure_quarantines_actor() {
+        let source = r#"
+            workflow FailureCheckpointRejected {
+                step fail_step {
+                    {
+                        self.answer = "uncommitted"
+                        let m: Maybe[Int] = None in
+                        match m { | Some(x) => x }
+                    }
+                }
+            }
+            type Maybe[V] = Some(V) | None
+            let w = spawn FailureCheckpointRejected {} in { w }
+        "#;
+        let backing = SharedMemoryStore::new();
+        let (module, _ty) = compile_source(source).unwrap();
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        rt.borrow_mut().persistence = Box::new(backing.clone());
+
+        let value = {
+            let mut vm = VM::new();
+            vm.load_module(module);
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+            vm.run().unwrap()
+        };
+        let actor_id = value.as_actor_id().expect("spawn should return actor ref");
+        let safe = backing.load_snapshot(actor_id).expect("initial durable snapshot");
+        rt.borrow_mut().persistence =
+            Box::new(RejectStepFailedCheckpointStore(backing.clone()));
+
+        rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        rt.borrow_mut().run_scheduler();
+
+        assert!(
+            !rt.borrow().actors.contains_key(&actor_id),
+            "a failed terminal checkpoint must quarantine the live workflow"
+        );
+        assert!(
+            backing.read_workflow_events(actor_id).iter().any(|event| {
+                matches!(event, WorkflowEvent::StepFailed { .. })
+            }),
+            "the injected checkpoint failure must occur after StepFailed append"
+        );
+        let recovered = backing.load_snapshot(actor_id).expect("safe snapshot remains");
+        assert_eq!(
+            recovered.sequence, safe.sequence,
+            "failure checkpoint must not publish speculative state"
+        );
+        assert_eq!(
+            recovered.state.get("answer"),
+            safe.state.get("answer")
+        );
+        assert!(
+            rt.borrow_mut().recover_actor(actor_id).is_none(),
+            "orphan StepFailed history beyond the safe snapshot must fail closed"
         );
     }
 
