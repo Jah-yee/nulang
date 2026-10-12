@@ -450,7 +450,9 @@ impl OrcaGc {
     /// foreign-count decrement for each entry on the owning side.  Draining
     /// makes a repeated call a no-op, so exit handling can be idempotent.
     pub fn take_held_refs(&mut self) -> Vec<(u64, *mut OrcaHeader)> {
-        std::mem::take(&mut self.held_foreign_refs).into_iter().collect()
+        std::mem::take(&mut self.held_foreign_refs)
+            .into_iter()
+            .collect()
     }
 
     /// Process a foreign ref operation delivered from another actor.
