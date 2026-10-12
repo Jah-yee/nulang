@@ -12,7 +12,9 @@ fn checked_integer_negation_must_not_enter_native_jit_without_exception_exit() {
     // The typed emitter still contains a raw INeg arm, so check *both*
     // admission gates, not just the scalar compiler's supported-opcode list.
     assert!(!crate::jit::compiler::is_opcode_compilable(OpCode::INeg));
-    assert!(!crate::jit::typed_compiler::is_opcode_supported_typed(OpCode::INeg));
+    assert!(!crate::jit::typed_compiler::is_opcode_supported_typed(
+        OpCode::INeg
+    ));
 }
 
 #[test]
