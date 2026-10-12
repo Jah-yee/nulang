@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Verify committed state survives SIGKILL and a fresh Nulang CLI process.
 
-The first CLI process stays alive in IO.read after confirming durable actor
-operations. The harness sends SIGKILL only after observing that marker and a
+The first CLI process stays alive in an explicit first-run loop after
+confirming durable actor operations. The harness sends SIGKILL only after observing that marker and a
 persisted snapshot. This is not a claim about arbitrary write-time crash windows.
 """
 import argparse
@@ -31,8 +31,13 @@ fn main() {
         let ignored = ask c increment()
         let after = ask c current()
         perform IO.print("RESTORED=" + perform Int.to_string(before) + " SAVED=" + perform Int.to_string(after))
-        let held = perform IO.read()
-        0
+        // Keep the initial process live without relying on IO.read, which
+        // the native CLI currently rejects as an unhandled effect.
+        // On a fresh second process the restored counter is 1 and this
+        // loop is skipped so restart verification can terminate.
+        if before == 0 then {
+            while true { unit }
+        } else { unit }
     }
 }
 '''
