@@ -600,9 +600,9 @@ impl RealtimeRegistry {
     fn validate_room(room: &str) -> Result<(), RealtimeLimitError> {
         if room.is_empty()
             || room.len() > MAX_REALTIME_ROOM_NAME_BYTES
-            || !room.bytes().all(|b| {
-                b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':' | b'/')
-            })
+            || !room
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':' | b'/'))
             || room
                 .split('/')
                 .any(|segment| segment.is_empty() || segment == "." || segment == "..")
@@ -691,7 +691,9 @@ impl RealtimeRegistry {
 
     fn unsubscribe(&mut self, room: &str, id: u64) {
         if let Some(entry) = self.rooms.get_mut(room) {
-            entry.listeners.retain(|(subscriber_id, _)| *subscriber_id != id);
+            entry
+                .listeners
+                .retain(|(subscriber_id, _)| *subscriber_id != id);
         }
     }
 }
@@ -1154,10 +1156,7 @@ impl WebDevServer {
                     stream,
                     &HttpResponse {
                         status,
-                        headers: vec![(
-                            "Content-Type".into(),
-                            "text/plain; charset=utf-8".into(),
-                        )],
+                        headers: vec![("Content-Type".into(), "text/plain; charset=utf-8".into())],
                         body: format!("SSE subscription rejected: {error:?}").into_bytes(),
                     },
                 );
@@ -1257,7 +1256,10 @@ impl WebDevServer {
 /// must themselves be trusted and not writable by untrusted callers.
 fn safe_static_candidate(root: &Path, relative: &str) -> Option<PathBuf> {
     let rel = Path::new(relative);
-    if rel.components().any(|part| !matches!(part, Component::Normal(_))) {
+    if rel
+        .components()
+        .any(|part| !matches!(part, Component::Normal(_)))
+    {
         return None;
     }
     let root = root.canonicalize().ok()?;
@@ -1448,8 +1450,7 @@ mod tests {
 
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(dir.join("private.txt"), public.join("alias.txt"))
-                .unwrap();
+            std::os::unix::fs::symlink(dir.join("private.txt"), public.join("alias.txt")).unwrap();
             assert_eq!(
                 WebDevServer::serve_static(Some(&public), None, "/alias.txt").status,
                 404
@@ -1478,14 +1479,14 @@ mod tests {
 
         let (_id, replay, _live) = registry.subscribe("unit:bounded").unwrap();
         assert_eq!(replay.len(), MAX_REALTIME_HISTORY_MESSAGES);
-        let latest =
-            format!("event-{}", MAX_REALTIME_HISTORY_MESSAGES + MAX_REALTIME_SUBSCRIBER_BACKLOG + 3);
-        assert_eq!(replay.last().map(String::as_str), Some(latest.as_str()));
-        assert!(
-            registry
-                .broadcast("unit:bounded", &"x".repeat(MAX_REALTIME_MESSAGE_BYTES + 1))
-                .is_err()
+        let latest = format!(
+            "event-{}",
+            MAX_REALTIME_HISTORY_MESSAGES + MAX_REALTIME_SUBSCRIBER_BACKLOG + 3
         );
+        assert_eq!(replay.last().map(String::as_str), Some(latest.as_str()));
+        assert!(registry
+            .broadcast("unit:bounded", &"x".repeat(MAX_REALTIME_MESSAGE_BYTES + 1))
+            .is_err());
     }
 
     #[test]
@@ -1501,9 +1502,7 @@ mod tests {
         }
         let room = registry.rooms.get("unit:bytes").unwrap();
         assert!(room.replay_bytes <= MAX_REALTIME_HISTORY_BYTES);
-        assert!(
-            room.messages.len() <= MAX_REALTIME_HISTORY_BYTES / MAX_REALTIME_MESSAGE_BYTES
-        );
+        assert!(room.messages.len() <= MAX_REALTIME_HISTORY_BYTES / MAX_REALTIME_MESSAGE_BYTES);
     }
 
     #[test]
