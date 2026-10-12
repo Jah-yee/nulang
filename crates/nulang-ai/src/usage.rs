@@ -75,7 +75,7 @@ impl TokenBudget {
     pub fn charge(&self, tokens: u64) {
         let mut current = self.used.load(Ordering::Relaxed);
         loop {
-            let new = (current + tokens).min(self.limit);
+            let new = current.saturating_add(tokens).min(self.limit);
             match self.used.compare_exchange_weak(
                 current,
                 new,
