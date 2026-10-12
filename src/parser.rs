@@ -6985,7 +6985,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_parse_explicit_open_record_annotation() {
         let module = parse("fn get_x(p: { x: Int, .. }) -> Int { p.x }").unwrap();
@@ -6995,7 +6994,9 @@ mod tests {
         let Type::Record(fields) = params[0].ty.as_ref().expect("type annotation") else {
             panic!("expected record type");
         };
-        assert!(fields.iter().any(|(name, ty)| name == "x" && *ty == Type::int()));
+        assert!(fields
+            .iter()
+            .any(|(name, ty)| name == "x" && ty == &Type::int()));
         assert!(fields.iter().any(|(name, ty)| {
             name == crate::types::RECORD_ROW_TAIL_FIELD && matches!(ty, Type::Var(_))
         }));

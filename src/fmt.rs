@@ -1227,7 +1227,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn test_fmt_explicit_open_record_annotation() {
         let src = "fn get_x(p: { x: Int, .. }) -> Int { p.x }";
