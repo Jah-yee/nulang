@@ -8370,6 +8370,48 @@ fn counter_grain_module() -> crate::bytecode::CodeModule {
 
 /// A grain message sent from shard 0 to a grain owned by shard 1 is routed
 /// across shards and hydrates the grain on the owning shard.
+/// A cross-shard grain send already owns its Vec payload. For more than four
+/// values, moving that allocation into MessagePayload must be zero-copy.
+#[test]
+fn test_cross_shard_grain_owned_large_payload_preserves_allocation() {
+    let module = counter_grain_module();
+    let mut shards = Runtime::new_sharded(2);
+    for shard in &mut shards {
+        shard.register_module_grains(&module);
+    }
+
+    let mut grain_id = GrainId::new("Counter", "owned-payload");
+    for index in 0..1000 {
+        if grain_actor_id(&grain_id) % 2 == 1 {
+            break;
+        }
+        grain_id = GrainId::new("Counter", &format!("owned-{index}"));
+    }
+    assert_eq!(grain_actor_id(&grain_id) % 2, 1);
+
+    let values: Vec<Value> = (0..5).map(Value::int).collect();
+    let original_ptr = values.as_ptr();
+    shards[0].send_to_grain(grain_id, "inc", values, 0);
+    let message = shards[1]
+        .cross_shard_rx
+        .as_ref()
+        .unwrap()
+        .try_recv()
+        .expect("owned cross-shard grain message admitted");
+    match message {
+        CrossShardMsg::DeliverMessage { payload, .. } => {
+            assert!(!payload.is_inline());
+            assert_eq!(
+                payload.as_slice().as_ptr(),
+                original_ptr,
+                "owned >4-Value grain payload should reuse its existing Vec allocation"
+            );
+            assert_eq!(payload.as_slice().len(), 5);
+        }
+        other => panic!("expected cross-shard grain message: {other:?}"),
+    }
+}
+
 #[test]
 fn test_send_to_grain_cross_shard_routes_and_hydrates() {
     let module = counter_grain_module();
