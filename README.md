@@ -59,13 +59,6 @@ Download the latest archive and its matching `.sha256` file from
 [GitHub Releases](https://github.com/nulang-org/nulang/releases), verify the
 checksum, then put the extracted executable on your PATH.
 
-**Python interop is not included in the public pre-built archives.**
-They use the `release-cli` profile so the executable does not depend on
-the host's Python shared-library version. To use `Python.*` effects, build
-from source with `cargo build --locked --release --no-default-features --features full`
-and provide the matching Python development/runtime libraries. A public
-archive may recognize Python effect names but cannot execute them.
-
 Linux x86_64 example:
 
 ```bash
