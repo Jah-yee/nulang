@@ -18,6 +18,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DIR_ENV: &str = "NULANG_LLM_PROVIDER_COMMIT_KILL_DIR";
 const READY: &str = "NULANG_LLM_PROVIDER_COMMITTED:";
+const TERMINAL_DIR_ENV: &str = "NULANG_LLM_TERMINAL_CHECKPOINT_KILL_DIR";
+const TERMINAL_READY: &str = "NULANG_LLM_TERMINAL_CHECKPOINT:";
 const SOURCE: &str = r#"
     workflow ProviderCommitKill {
         step ask_step { self.answer = perform Inference.ask("hello") }
@@ -167,12 +169,78 @@ fn child_provider_commits_while_compiled_workflow_is_suspended() {
     }
 }
 
-fn kill_after_provider_commit(directory: &Path) -> u64 {
+
+#[test]
+fn child_terminal_checkpoint_after_compiled_inference() {
+    let Ok(directory) = std::env::var(TERMINAL_DIR_ENV) else {
+        return;
+    };
+    let directory = PathBuf::from(directory);
+    let (module, _) = compile_source(SOURCE).expect("compile actual workflow bytecode");
+    let rt = Rc::new(RefCell::new(Runtime::new()));
+    rt.borrow_mut().persistence = Box::new(
+        LibsqlStore::new(directory.join("actor.db")).expect("open SQLite store"),
+    );
+
+    let reference = {
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+        vm.run().expect("spawn compiled workflow")
+    };
+    let actor_id = reference.as_actor_id().expect("actor id");
+    let provider = LedgerProvider::new(directory.clone(), false, actor_id);
+    rt.borrow_mut()
+        .set_llm_client(Box::new(provider.clone()));
+    rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+    rt.borrow_mut().run_scheduler();
+
+    {
+        let current = rt.borrow();
+        let actor = current.actors.get(&actor_id).expect("completed actor");
+        assert_eq!(
+            actor.get_state_field("step_index").and_then(|value| value.as_int()),
+            Some(1),
+            "step must finish before child announces persisted checkpoint"
+        );
+        let snapshot = current
+            .persistence
+            .load_snapshot(actor_id)
+            .expect("terminal SQLite checkpoint");
+        assert_eq!(
+            snapshot.state.get("step_index"),
+            Some(&crate::runtime::PersistedValue::Int(1)),
+            "the committed checkpoint must contain the completed step"
+        );
+        assert_eq!(
+            current.persistence.read_workflow_events(actor_id).iter()
+                .filter(|event| matches!(event, WorkflowEvent::StepCompleted { .. }))
+                .count(),
+            1,
+            "terminal step event must already exist on disk"
+        );
+    }
+    assert_eq!(provider.new_mutations.load(Ordering::SeqCst), 1);
+    println!("{TERMINAL_READY}{actor_id}");
+    std::io::stdout()
+        .flush()
+        .expect("flush terminal-checkpoint readiness");
+    loop {
+        std::thread::park();
+    }
+}
+
+fn kill_after_stage(
+    directory: &Path,
+    child_test: &str,
+    child_dir_env: &str,
+    ready_marker: &str,
+) -> u64 {
     let mut child = Command::new(std::env::current_exe().expect("test binary"))
         .arg("--exact")
-        .arg("integration_tests::tests::llm_provider_commit_hard_kill::child_provider_commits_while_compiled_workflow_is_suspended")
+        .arg(child_test)
         .arg("--nocapture")
-        .env(DIR_ENV, directory)
+        .env(child_dir_env, directory)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
@@ -185,7 +253,7 @@ fn kill_after_provider_commit(directory: &Path) -> u64 {
             let Ok(line) = line else {
                 break;
             };
-            if let Some(id) = line.split(READY).nth(1) {
+            if let Some(id) = line.split(ready_marker).nth(1) {
                 let _ = send.send(id.trim().parse::<u64>());
                 return;
             }
@@ -215,7 +283,12 @@ fn compiled_inference_provider_commit_receipt_loss_deduplicates_on_recovery() {
         std::process::id()
     ));
     fs::create_dir_all(&directory).expect("create isolated directory");
-    let actor_id = kill_after_provider_commit(&directory);
+    let actor_id = kill_after_stage(
+        &directory,
+        "integration_tests::tests::llm_provider_commit_hard_kill::child_provider_commits_while_compiled_workflow_is_suspended",
+        DIR_ENV,
+        READY,
+    );
 
     let (module, _) = compile_source(SOURCE).expect("recompile recovery bytecode");
     let meta = module.actor_metadata.first().expect("workflow actor metadata");
@@ -287,6 +360,88 @@ fn compiled_inference_provider_commit_receipt_loss_deduplicates_on_recovery() {
         .filter(|entry| entry.file_name().to_string_lossy().ends_with(".receipt"))
         .count();
     assert_eq!(provider_receipts, 1, "only one provider mutation may commit");
+
+    drop(runtime);
+    fs::remove_dir_all(directory).expect("remove isolated provider/SQLite state");
+}
+
+
+#[test]
+fn compiled_inference_after_terminal_checkpoint_does_not_redispatch() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "nulang-llm-terminal-kill-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("create isolated directory");
+    let actor_id = kill_after_stage(
+        &directory,
+        "integration_tests::tests::llm_provider_commit_hard_kill::child_terminal_checkpoint_after_compiled_inference",
+        TERMINAL_DIR_ENV,
+        TERMINAL_READY,
+    );
+
+    let (module, _) = compile_source(SOURCE).expect("recompile recovery bytecode");
+    let meta = module.actor_metadata.first().expect("workflow actor metadata");
+    let mut offsets = vec![0; module.behaviors.len()];
+    for &index in &meta.behavior_indices {
+        if let Some(behavior) = module.behaviors.get(index) {
+            offsets[index] = behavior.code_offset;
+        }
+    }
+
+    let runtime = Rc::new(RefCell::new(Runtime::new()));
+    runtime.borrow_mut().persistence = Box::new(
+        LibsqlStore::new(directory.join("actor.db")).expect("reopen SQLite after SIGKILL"),
+    );
+    let provider = LedgerProvider::new(directory.clone(), false, actor_id);
+    runtime
+        .borrow_mut()
+        .set_llm_client(Box::new(provider.clone()));
+    runtime.borrow_mut().register_recovery_module(
+        actor_id,
+        module.clone(),
+        offsets,
+        vec![None; module.behaviors.len()],
+    );
+    assert_eq!(
+        runtime.borrow_mut().recover_actor(actor_id),
+        Some(actor_id),
+        "a completed and checkpointed compiled workflow should recover"
+    );
+    runtime.borrow_mut().run_scheduler();
+
+    {
+        let recovered = runtime.borrow();
+        let actor = recovered.actors.get(&actor_id).expect("recovered workflow");
+        assert_eq!(
+            actor.get_state_field("step_index").and_then(|value| value.as_int()),
+            Some(1)
+        );
+        assert_eq!(
+            recovered.actor_state_string(actor_id, "answer").as_deref(),
+            Some(RESULT)
+        );
+        assert_eq!(
+            recovered.persistence.read_workflow_events(actor_id).iter()
+                .filter(|event| matches!(
+                    event,
+                    WorkflowEvent::StepCompleted { step_name, .. } if step_name == "ask_step"
+                ))
+                .count(),
+            1,
+            "recovery must not create a second terminal completion"
+        );
+    }
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        0,
+        "a committed terminal workflow must not issue another provider request"
+    );
+    assert_eq!(provider.new_mutations.load(Ordering::SeqCst), 0);
 
     drop(runtime);
     fs::remove_dir_all(directory).expect("remove isolated provider/SQLite state");
