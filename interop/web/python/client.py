@@ -11,7 +11,7 @@ import re
 from typing import Any, Mapping
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 _METHODS = {"get", "put", "post", "delete", "patch", "head", "options", "trace"}
 _TRACEPARENT = re.compile(r"^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$")
@@ -52,6 +52,11 @@ def _validate_traceparent(value: str) -> None:
         raise ValueError("traceparent must be a valid W3C version-00 trace context")
 
 
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class NulangWebClient:
     def __init__(self, base_url: str, contract: Mapping[str, Any], *, token: str | None = None,
                  timeout: float = 10.0):
@@ -63,6 +68,7 @@ class NulangWebClient:
         self._base = parsed
         self._token = token
         self._timeout = timeout
+        self._opener = build_opener(_NoRedirect)
         self._ops: dict[str, tuple[str, str, Mapping[str, Any]]] = {}
         if not str(contract.get("openapi", "")).startswith("3.") or not isinstance(contract.get("paths"), dict):
             raise ValueError("an OpenAPI 3.x document with paths is required")
@@ -148,7 +154,7 @@ class NulangWebClient:
                           urlencode(params), ""))
         request = Request(url, data=payload, headers=req_headers, method=method)
         try:
-            with urlopen(request, timeout=self._timeout) as response:
+            with self._opener.open(request, timeout=self._timeout) as response:
                 return ApiResponse(response.status, dict(response.headers.items()), response.read())
         except HTTPError as error:
             with error:
