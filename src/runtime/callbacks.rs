@@ -3163,4 +3163,47 @@ mod host_authority_tests {
         );
         std::fs::remove_file(path).unwrap();
     }
+
+    #[test]
+    fn scheduler_driven_actor_can_read_exactly_authorized_file() {
+        use crate::vm::ActorVmCallbacks;
+
+        let filename = format!(
+            "nulang-scheduler-fs-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(filename);
+        std::fs::write(&path, "scheduler-readable-data").unwrap();
+        let filename = path.to_string_lossy().into_owned();
+
+        let actor_id = 800_102;
+        let mut rt = Runtime::new();
+        let mut actor = Actor::new(actor_id, "scheduler-fs", 8);
+        let grant = format!("Fs::Read({filename})");
+        let manifest = AuthorityManifest::from_tokens([grant.as_str()]).unwrap();
+        actor.install_authority_manifest(&manifest);
+        rt.actors.insert(actor_id, actor);
+
+        let mut module = crate::bytecode::CodeModule::new("scheduler-file");
+        module.add_constant(Constant::String(filename));
+        let mut callbacks =
+            super::BytecodeRuntimeCallbacks::new(&mut rt as *mut Runtime, actor_id);
+        let result = callbacks
+            .perform_builtin_effect_in_module(
+                "FS",
+                Some("read"),
+                &module,
+                &[Value::string(0)],
+            )
+            .expect("scheduler actor must dispatch authorized FS.read");
+        assert_eq!(
+            crate::vm::resolve_value_string(&module.constants, result),
+            "scheduler-readable-data"
+        );
+        std::fs::remove_file(path).unwrap();
+    }
 }
