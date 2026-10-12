@@ -2,6 +2,7 @@
 """Equivalent single-job durable state machine using Python stdlib SQLite."""
 import os
 import sqlite3
+import sys
 
 
 def transition(conn: sqlite3.Connection, mode: str) -> tuple[int, int]:
@@ -27,8 +28,7 @@ def main() -> None:
             stage, completions = transition(conn, mode)
             print(f"PREPARED={stage}:{completions}", flush=True)
             # Intentionally block; the parent kills us with SIGKILL.
-            with open("gate.fifo", "r", encoding="utf-8") as fifo:
-                fifo.read()
+            sys.stdin.readline()
         else:
             with conn:
                 conn.execute("CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY, stage INTEGER NOT NULL, completions INTEGER NOT NULL)")
