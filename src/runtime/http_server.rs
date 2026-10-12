@@ -1146,20 +1146,24 @@ mod tests {
                 path: "/users/42?token=hidden".to_string(),
                 headers: vec![(
                     "TrAcEpArEnT".to_string(),
-                    "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
-                        .to_string(),
+                    "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
                 )],
                 body: Vec::new(),
             };
-            let _entered = enter_http_request_span(&request)
-                .expect("enabled TRACE level has a request span");
+            let _entered =
+                enter_http_request_span(&request).expect("enabled TRACE level has a request span");
             let active = tracing::Span::current().context();
             let span = active.span();
             let ctx = span.span_context();
             assert!(ctx.is_valid());
-            assert_eq!(ctx.trace_id().to_bytes(),
-                0x4bf92f3577b34da6a3ce929d0e0e4736u128.to_be_bytes());
-            assert_ne!(ctx.span_id().to_bytes(), 0x00f067aa0ba902b7u64.to_be_bytes());
+            assert_eq!(
+                ctx.trace_id().to_bytes(),
+                0x4bf92f3577b34da6a3ce929d0e0e4736u128.to_be_bytes()
+            );
+            assert_ne!(
+                ctx.span_id().to_bytes(),
+                0x00f067aa0ba902b7u64.to_be_bytes()
+            );
         });
     }
 
