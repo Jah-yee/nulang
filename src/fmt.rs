@@ -1456,9 +1456,10 @@ fn main() {
 
     #[test]
     fn test_fmt_spawn_handle_receive() {
+        // Source without explicit semicolons can be formatted conservatively.
         let src = r#"
 fn main() {
-    let a = spawn Greeter();
+    let a = spawn Greeter()
     receive { | Msg(x) if x > 0 => x }
     emit Event(1)
 }"#;
@@ -1467,5 +1468,14 @@ fn main() {
         assert!(out.contains("receive {"), "got: {out}");
         assert!(out.contains("emit Event(1)"), "got: {out}");
         assert_idempotent(src);
+    }
+
+    #[test]
+    fn test_fmt_rejects_dropping_explicit_semicolons() {
+        let src = "fn main() { let a = 1; a }";
+        assert!(
+            format_source(src).is_err(),
+            "an AST printer that drops source semicolons must refuse this edit"
+        );
     }
 }
