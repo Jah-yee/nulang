@@ -12393,6 +12393,86 @@ match { a: 2, b: 9 } with {
         );
     }
 
+    /// Restore declared user state in an entirely new runtime, independently
+    /// of the real-process LLM/SIGKILL acceptance fixture.
+    #[test]
+    fn test_workflow_declared_string_state_restores_after_runtime_recreation() {
+        let source = r#"
+            workflow RecoveredState {
+                state durable answer: String = ""
+                state local scratch: Int = 0
+                step write {
+                    (self.answer = "answer-after-restart", self.scratch = 77)
+                }
+            }
+            let w = spawn RecoveredState {} in { w }
+        "#;
+        let (module, _ty) = compile_source(source).expect("compile recovery fixture");
+        let persistence = SharedMemoryStore::new();
+        let rt1 = Rc::new(RefCell::new(Runtime::new()));
+        rt1.borrow_mut().persistence = Box::new(persistence.clone());
+        let value = {
+            let mut vm = VM::new();
+            vm.load_module(module.clone());
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt1.clone())));
+            vm.run().expect("spawn durable workflow")
+        };
+        let actor_id = value.as_actor_id().expect("workflow actor id");
+        rt1.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        rt1.borrow_mut().run_scheduler();
+
+        let checkpoint = persistence
+            .load_snapshot(actor_id)
+            .expect("completed-step checkpoint");
+        assert_eq!(
+            checkpoint.state.get("answer"),
+            Some(&crate::runtime::PersistedValue::String(
+                "answer-after-restart".to_string()
+            ))
+        );
+        assert!(!checkpoint.state.contains_key("scratch"));
+
+        let meta = module.actor_metadata.first().expect("workflow metadata");
+        let mut offsets = vec![0; module.behaviors.len()];
+        for &index in &meta.behavior_indices {
+            offsets[index] = module.behaviors[index].code_offset;
+        }
+        drop(rt1);
+
+        let rt2 = Rc::new(RefCell::new(Runtime::new()));
+        rt2.borrow_mut().persistence = Box::new(persistence.clone());
+        rt2.borrow_mut().register_recovery_module(
+            actor_id,
+            module.clone(),
+            offsets,
+            vec![None; module.behaviors.len()],
+        );
+        assert_eq!(
+            rt2.borrow_mut().recover_actor(actor_id),
+            Some(actor_id),
+            "a completed workflow with declared state must recover"
+        );
+        let restored = rt2.borrow();
+        let actor = restored.actors.get(&actor_id).expect("restored actor");
+        assert_eq!(
+            actor
+                .get_state_field("answer")
+                .map(|value| actor.persist_value(&value)),
+            Some(crate::runtime::PersistedValue::String(
+                "answer-after-restart".to_string()
+            ))
+        );
+        assert_eq!(
+            actor.get_state_field("step_index").and_then(|value| value.as_int()),
+            Some(1)
+        );
+        assert_ne!(
+            actor.get_state_field("scratch").and_then(|value| value.as_int()),
+            Some(77),
+            "process-local state must not be restored from a durable snapshot"
+        );
+    }
+
     #[test]
     fn test_workflow_declared_state_rejects_mismatched_step_assignment() {
         let source = r#"
