@@ -62,7 +62,7 @@ fn bench_first_heap_alloc_batch(c: &mut Criterion) {
     group.throughput(Throughput::Elements(IDLE_ACTOR_BATCH as u64));
 
     group.bench_function("1000", |b| {
-        b.iter_batched(
+        b.iter_batched_ref(
             || {
                 let mut rt = Runtime::new();
                 let ids: Vec<u64> = (0..IDLE_ACTOR_BATCH)
@@ -70,8 +70,8 @@ fn bench_first_heap_alloc_batch(c: &mut Criterion) {
                     .collect();
                 (rt, ids)
             },
-            |(mut rt, ids)| {
-                for &actor_id in &ids {
+            |(rt, ids)| {
+                for &actor_id in ids.iter() {
                     let ptr = rt
                         .actors
                         .get_mut(&actor_id)
@@ -82,11 +82,8 @@ fn bench_first_heap_alloc_batch(c: &mut Criterion) {
                     black_box(ptr);
                 }
                 black_box(rt.actor_count());
-                // Returning the runtime defers destruction of the 1,000
-                // materialized heaps until Criterion has stopped this sample's
-                // timer. The benchmark therefore isolates first allocation
-                // instead of timing mass pool return/deallocation.
-                (rt, ids)
+                // Criterion retains ownership of the fixture until its timed
+                // invocation ends, excluding the 1,000 heap destructors.
             },
             BatchSize::SmallInput,
         )
