@@ -58,6 +58,7 @@ def command_output(
     *,
     cwd: Path = ROOT,
     cpu_affinity: set[int] | None = None,
+    timeout_seconds: int | None = None,
 ) -> str:
     """Run one command, optionally constraining the child to specific CPUs."""
 
@@ -82,6 +83,7 @@ def command_output(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         preexec_fn=preexec_fn,
+        timeout=timeout_seconds,
     )
     return proc.stdout
 
@@ -358,8 +360,15 @@ def main() -> int:
             "the host scheduler unconstrained and is diagnostic only"
         ),
     )
+    parser.add_argument(
+        "--timeout-seconds", type=int, default=120,
+        help="maximum wall-clock seconds per measured fixture process (default: 120)",
+    )
     parser.add_argument("--output", type=Path, help="write full JSON report here")
     args = parser.parse_args()
+
+    if args.timeout_seconds < 1:
+        parser.error("--timeout-seconds must be >= 1")
 
     if args.runs < 1 or args.warmup < 0:
         parser.error("--runs must be >= 1 and --warmup must be >= 0")
@@ -398,10 +407,17 @@ def main() -> int:
         index = round_idx - args.warmup + 1 if measured else round_idx + 1
         for runtime in selected:
             print(f"[{phase} {index}] {runtime}", flush=True)
-            output = command_output(
-                commands[runtime],
-                cpu_affinity=cpu_affinity,
-            )
+            try:
+                output = command_output(
+                    commands[runtime],
+                    cpu_affinity=cpu_affinity,
+                    timeout_seconds=args.timeout_seconds,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(
+                    f"{runtime}: fixture timed out after {args.timeout_seconds}s "
+                    f"during {phase} {index}"
+                ) from exc
             records = parse_records(output, runtime)
             if measured:
                 for name, row in records.items():
