@@ -4,24 +4,6 @@ description: Build Nulang from source and set up your development environment.
 ---
 import CopyMarkdown from '../../../components/CopyMarkdown.astro';
 
-## Pre-built releases and Python support
-
-[Tagged release archives](https://github.com/nulang-org/nulang/releases) are
-built with the `release-cli` feature profile. They include the standard CLI
-and native actor runtime but intentionally **exclude `Python.*` interop**
-to avoid a version-specific `libpython` dependency. Python effect names may
-still be recognized by the compiler; the pre-built CLI cannot execute them.
-
-If your application uses Python interop, build with the source `full` feature
-profile instead (and install the Python development/runtime libraries):
-
-```bash
-cargo build --locked --release --no-default-features --features full
-```
-
-The prerequisites and build instructions below describe **source builds**;
-release archive users do not need a Rust toolchain.
-
 ## Prerequisites
 
 <CopyMarkdown />
