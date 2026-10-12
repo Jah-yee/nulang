@@ -88,13 +88,15 @@ pub trait DistributedVmCallbacks: std::any::Any + std::fmt::Debug {
         Value::unit()
     }
 
+    /// Fail closed when no distributed callback implements remote spawning.
+    /// Only an admitted spawn may produce a valid actor reference.
     fn remote_spawn(
         &mut self,
         _target_node: u64,
         _behavior: &str,
         _init: &[(String, Value)],
     ) -> Value {
-        Value::actor_ref(0)
+        Value::nil()
     }
 }
 
@@ -1011,7 +1013,7 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
         _behavior_idx: usize,
         _init: Vec<(String, Value)>,
     ) -> Value {
-        Value::actor_ref(0)
+        Value::nil()
     }
 
     fn send_message(&mut self, _target: Value, _behavior_id: u16, _args: &[Value]) {}
@@ -4700,7 +4702,7 @@ impl VM {
             self.actor_callbacks
                 .spawn_actor(module, spawn_pc, behavior_idx, init)
         } else {
-            Value::actor_ref(0)
+            Value::nil()
         };
         self.frames[frame_idx].regs[instr.op3 as usize] = result;
         Ok(())
@@ -4775,7 +4777,7 @@ impl VM {
             if let Some(cb) = &mut self.distributed_callbacks {
                 cb.remote_spawn(node_id, &behavior_name, &init)
             } else {
-                Value::actor_ref(0)
+                Value::nil()
             }
         } else {
             match self.modules.get(module_idx) {
@@ -4783,7 +4785,7 @@ impl VM {
                     self.actor_callbacks
                         .spawn_actor(module, spawn_pc, behavior_idx, init)
                 }
-                None => Value::actor_ref(0),
+                None => Value::nil(),
             }
         };
         self.frames[frame_idx].regs[node_reg] = result;
