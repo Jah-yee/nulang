@@ -7935,7 +7935,13 @@ fn test_cross_shard_named_send_preserves_inline_payload() {
         // admission path, not just the in-flight representation.
         shards[0].send_message(target, "handle", &values);
         shards[1].drain_cross_shard_messages();
-        let received = shards[1].actors.get_mut(&target).unwrap().mailbox.pop().unwrap();
+        let received = shards[1]
+            .actors
+            .get_mut(&target)
+            .unwrap()
+            .mailbox
+            .pop()
+            .unwrap();
         assert_eq!(received.payload.as_slice(), values.as_slice());
         assert_eq!(received.payload.is_inline(), len <= 4);
     }
