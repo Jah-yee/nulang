@@ -2,7 +2,7 @@
 
 ### Matched Erlang/OTP gen_server actor benchmarks — 2026-10-12
 - **An opt-in `erlang_otp` cross-runtime fixture measures real OTP generic-server actor dispatch.** Counting, ping-pong, thread-ring, and fork-join execute the existing logical-message contracts via `gen_server:cast`, leaving standard Rust/Go/BEAM baselines unchanged.
-- **Cross-runtime reporting rejects invalid benchmark records before summarizing them.** Duplicate workloads, non-positive timing, inconsistent workload message counts, and duplicate selected runtimes fail closed; ten Python contract tests are run by the comparison workflow.
+- **Cross-runtime reporting rejects invalid benchmark records before summarizing them.** Duplicate workloads, non-positive timing, inconsistent workload message counts, and duplicate selected runtimes fail closed; eleven Python contract tests are run by the comparison workflow.
 - **Measured fixture processes now have a bounded wall-clock timeout.** A deadlocked runtime fails the cross-runtime run rather than consuming an entire CI job.
 - **CI includes the OTP fixture in cross-runtime artifacts but does not imply an actor-framework speed claim.** Every comparative number still requires a successful same-host run and explicit interpretation of shared-runner noise and unmatched scheduling semantics.
 
