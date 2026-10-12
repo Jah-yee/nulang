@@ -32,6 +32,32 @@ class CrossShardCriterionABTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "16"):
                 ab.read_means(root)
 
+    def test_criterion_sanitizes_slash_in_group_directory(self) -> None:
+        # Criterion 0.5 replaces '/' in the *group* with '_' for the
+        # filesystem, while the benchmark ID still uses the original '/'.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for i, name in enumerate(ab.BENCHMARKS):
+                group, parameter = name.rsplit("/", 1)
+                path = root / f"{group.replace('/', '_')}/{parameter}/new/estimates.json"
+                path.parent.mkdir(parents=True)
+                path.write_text(json.dumps({"mean": {"point_estimate": float(i + 1)}}))
+            rows = ab.read_means(root)
+            self.assertEqual(list(rows), list(ab.BENCHMARKS))
+            self.assertEqual(rows[ab.BENCHMARKS[-1]], 5.0)
+
+    def test_criterion_rejects_ambiguous_normalized_results(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ab.BENCHMARKS:
+                group, parameter = name.rsplit("/", 1)
+                for actual in (name, f"{group.replace('/', '_')}/{parameter}"):
+                    path = root / actual / "new" / "estimates.json"
+                    path.parent.mkdir(parents=True)
+                    path.write_text(json.dumps({"mean": {"point_estimate": 1.0}}))
+            with self.assertRaisesRegex(RuntimeError, "ambiguous"):
+                ab.read_means(root)
+
     def test_paired_summary_reports_degradation_and_bootstrap_interval(self) -> None:
         outcome = ab.summarize_pairs([100.0] * 4, [110.0] * 4)
         self.assertEqual(outcome["pairs"], 4)
