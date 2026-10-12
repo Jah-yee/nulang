@@ -47,7 +47,8 @@ def verify_artifact(
         raise VerificationError(
             f"checksum filename mismatch: expected {archive.name!r}, got {filename!r}"
         )
-    actual = hashlib.file_digest(archive.open("rb"), "sha256").hexdigest()
+    with archive.open("rb") as source:
+        actual = hashlib.file_digest(source, "sha256").hexdigest()
     if actual.lower() != digest.lower():
         raise VerificationError("release archive checksum mismatch")
 
