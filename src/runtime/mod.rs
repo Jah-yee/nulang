@@ -600,8 +600,8 @@ pub struct Runtime {
     /// `None` when `shard_count == 1`.
     cross_shard_rx: Option<mpsc::Receiver<CrossShardMsg>>,
     /// Reusable batch staging for cross-shard receive passes. Empty between
-    /// scheduler turns; retaining its bounded channel-sized capacity avoids
-    /// a new heap allocation each time a busy shard drains incoming messages.
+    /// scheduler turns; its retained capacity is capped to avoid pinning
+    /// a large allocation after one exceptional burst.
     cross_shard_pending: Vec<CrossShardMsg>,
 }
 
@@ -1640,6 +1640,13 @@ impl Runtime {
             }
         }
         // Retain capacity, not envelopes (nor their ObjectRef leases).
+        // The channel is bounded, but active producers can replenish it
+        // while we snapshot a burst; avoid pinning an exceptionally large
+        // temporary allocation for the remaining life of this shard.
+        const MAX_RETAINED_BATCH_CAPACITY: usize = 256;
+        if pending.capacity() > MAX_RETAINED_BATCH_CAPACITY {
+            pending = Vec::new();
+        }
         self.cross_shard_pending = pending;
     }
 
