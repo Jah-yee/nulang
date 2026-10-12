@@ -78,6 +78,27 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
 }
 
+/// Enter a server span around a decoded HTTP request. HTTP trace headers
+/// are untrusted: invalid/duplicate traceparent is ignored and produces a
+/// new root instead. Only the method is recorded, never unbounded URLs,
+/// userinfo, headers, secrets, request body, or dynamic path segments.
+fn enter_http_request_span(request: &HttpRequest) -> Option<tracing::span::EnteredSpan> {
+    if !tracing::enabled!(tracing::Level::TRACE) {
+        return None;
+    }
+    let span = tracing::span!(
+        parent: None,
+        tracing::Level::TRACE,
+        "http_server_request",
+        http_request_method = request.method.as_str(),
+    );
+    #[cfg(feature = "otel")]
+    if let Some(remote) = super::TraceContext::from_http_headers(&request.headers) {
+        remote.attach_as_otel_parent(&span);
+    }
+    Some(span.entered())
+}
+
 /// Manages the background HTTP listener thread.
 /// Stored on Runtime; `HttpServerState::bind()` spawns the thread.
 pub struct HttpServerState {
@@ -232,6 +253,7 @@ impl HttpServerState {
                                 headers,
                                 body,
                             };
+                            let _request_span = enter_http_request_span(&request);
                             let response =
                                 Self::dispatch(handler_module, handler_func_idx, &request);
                             let keep_alive = false; // Phase 1: close after each request
@@ -892,6 +914,8 @@ impl WebDevServer {
                                 headers,
                                 body,
                             };
+
+                            let _request_span = enter_http_request_span(&request);
 
                             let mut response = if path.starts_with(Self::SSE_PATH_PREFIX) {
                                 let room = &path[Self::SSE_PATH_PREFIX.len()..];
