@@ -153,6 +153,7 @@ export default defineConfig({
           label: 'Why Nulang?',
           collapsed: false,
           items: [
+            { label: 'Use Cases', link: 'use-cases/' },
             { label: 'Comparisons & Philosophy', link: 'blog/' },
           ],
         },
