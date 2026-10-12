@@ -24,6 +24,11 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps({"path": self.path, "tenant": self.headers.get("x-tenant-id"),
                            "authorization": self.headers.get("Authorization"),
                            "traceparent": self.headers.get("traceparent")}).encode()
+        if "/redirect" in self.path:
+            self.send_response(302)
+            self.send_header("Location", "http://127.0.0.1:1/credentials")
+            self.end_headers()
+            return
         self.send_response(200 if "missing" not in self.path else 404)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -86,6 +91,12 @@ class ClientTests(unittest.TestCase):
             client.call("read_item", path={"item": "x"}, headers={"x-tenant-id": "a"}, query={"secret": "x"})
         with self.assertRaises(ValueError):
             client.call("read_item", path={"item": ".."}, headers={"x-tenant-id": "a"})
+
+    def test_does_not_follow_redirects_with_credentials(self):
+        with self.assertRaises(ApiError) as ex:
+            NulangWebClient(self.base, CONTRACT, token="secret").call(
+                "read_item", path={"item": "redirect"}, headers={"x-tenant-id": "acme"})
+        self.assertEqual(ex.exception.status, 302)
 
     def test_conflicting_bearer_header_rejected(self):
         client = NulangWebClient(self.base, CONTRACT, token="secret")
