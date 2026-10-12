@@ -113,7 +113,10 @@ mod remote_spawn_failure_contract_tests {
     fn default_remote_spawn_does_not_fabricate_actor_reference() {
         let mut callbacks = UnconfiguredDistributedCallbacks;
         let result = callbacks.remote_spawn(42, "Worker", &[]);
-        assert!(result.is_nil(), "unwired remote spawn must fail with nil, not ActorRef(0)");
+        assert!(
+            result.is_nil(),
+            "unwired remote spawn must fail with nil, not ActorRef(0)"
+        );
     }
 }
 

@@ -2616,7 +2616,10 @@ mod remote_spawn_failure_contract_tests {
     fn zero_actor_address_is_not_an_admitted_spawn() {
         let invalid = super::ActorAddress::local(0);
         let value = super::actor_ref_for_spawn_address(invalid);
-        assert!(value.is_nil(), "reserved actor id zero must never be a spawn success");
+        assert!(
+            value.is_nil(),
+            "reserved actor id zero must never be a spawn success"
+        );
 
         let pending = super::ActorAddress::remote(super::NodeId(42), 73);
         let valid = super::actor_ref_for_spawn_address(pending);
@@ -2631,7 +2634,10 @@ mod remote_spawn_failure_contract_tests {
         };
 
         let result = callbacks.remote_spawn(42, "Worker", &[]);
-        assert!(result.is_nil(), "unconfigured transport, cluster or resolver must return nil");
+        assert!(
+            result.is_nil(),
+            "unconfigured transport, cluster or resolver must return nil"
+        );
         assert!(runtime.distributed.transport.is_none());
         assert!(runtime.distributed.cluster.is_none());
         assert!(runtime.distributed.resolver.is_none());
